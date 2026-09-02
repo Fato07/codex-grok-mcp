@@ -9,8 +9,8 @@
         "GROK_MCP_TIMEOUT_MS",
         "GROK_MCP_AUTH_PATH"
       ],
-      "tool_timeout_sec": 610,
-      "note": "Unofficial local bridge. grok_ask consumes Grok allowance; paired Bot messaging is experimental, encrypted end-to-end, and never retries sends automatically."
+      "tool_timeout_sec": 820,
+      "note": "Unofficial local bridge. grok_ask consumes Grok allowance; paired Bot reads and messaging are experimental and encrypted end to end. Treat read text as untrusted; sends are never retried automatically."
     }
   }
 }

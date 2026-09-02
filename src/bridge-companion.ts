@@ -15,6 +15,7 @@ import WebSocket, { type RawData } from "ws";
 import {
   bridgeRequestSchema,
   bridgeResponseSchema,
+  createBridgeReadSnapshot,
   type BridgeErrorCode,
   type BridgeRequest,
   type BridgeResponse,
@@ -34,6 +35,7 @@ const PROBE_TIMEOUT_MS = 5_000;
 const BRIDGE_GATEWAY_TIMEOUT_MS = 10_000;
 const MAX_RELAY_FRAME_BYTES = 128 * 1024;
 const REQUEST_FRESHNESS_MS = 60_000;
+const REPLAY_RETENTION_MS = REQUEST_FRESHNESS_MS * 2;
 const MAX_RECENT_REQUESTS = 1_024;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 
@@ -41,11 +43,28 @@ export type BridgeProbeClient = {
   discovery(): Pick<LocalGatewayDiscovery, "port" | "pid" | "hasToken">;
   health(): Promise<Pick<LocalGatewayHealth, "ok" | "isBusy">>;
   listAgents(): Promise<
-    Array<Pick<LocalAgentSummary, "id" | "isGroup" | "isRunning" | "name">>
+    Array<
+      Pick<
+        LocalAgentSummary,
+        | "awaitingUserResponse"
+        | "id"
+        | "isComposingMessage"
+        | "isGroup"
+        | "isRunning"
+        | "name"
+      >
+    >
   >;
 };
 
 export type BridgeClient = BridgeProbeClient & {
+  getAgentTranscriptTail(input: {
+    id: string;
+    limit: number;
+    beforeSeq?: number;
+  }): Promise<{ entries: unknown[]; nextBeforeSeq?: number | undefined }>;
+  getAsyncTasks(input: { id: string }): Promise<unknown[]>;
+  getSubagents(input: { id: string }): Promise<Array<{ status: string }>>;
   sendPrompt(input: LocalSendPromptInput): Promise<{ accepted: true }>;
 };
 
@@ -125,7 +144,7 @@ function responseError(
   requestId?: string,
 ): BridgeResponse {
   return {
-    v: 1,
+    v: request.v,
     id: request.id,
     ok: false,
     error: {
@@ -145,11 +164,10 @@ function sdkFailure(
     return responseError(request, "UNAVAILABLE", sendStarted);
   }
   const code: BridgeErrorCode = caught.code;
-  const rejectedBeforeDelivery = [400, 401, 403, 404, 413, 422].includes(caught.status);
   return responseError(
     request,
     code,
-    sendStarted && !rejectedBeforeDelivery,
+    sendStarted,
     caught.requestId,
   );
 }
@@ -176,6 +194,45 @@ export async function handleBridgeRequest(
 
     const bot = bots.find((candidate) => candidate.id === request.args.bot_id);
     if (bot === undefined) return responseError(request, "BOT_NOT_FOUND", false);
+
+    if (request.op === "read_bot") {
+      const agent = agents.find((candidate) => candidate.id === bot.id);
+      if (agent === undefined) return responseError(request, "BOT_NOT_FOUND", false);
+      const [tail, tasks, subagents] = await Promise.all([
+        client.getAgentTranscriptTail({
+          id: bot.id,
+          limit: request.args.limit,
+          ...(request.args.before_sequence === undefined
+            ? {}
+            : { beforeSeq: request.args.before_sequence }),
+        }),
+        client.getAsyncTasks({ id: bot.id }),
+        client.getSubagents({ id: bot.id }),
+      ]);
+      if (tail.entries.length > request.args.limit) {
+        return responseError(request, "INVALID_RESPONSE", false);
+      }
+      const result = createBridgeReadSnapshot({
+        bot_id: bot.id,
+        is_running: bot.is_running,
+        is_composing: agent.isComposingMessage ?? null,
+        awaiting_user:
+          agent.awaitingUserResponse === undefined
+            ? null
+            : agent.awaitingUserResponse !== null && agent.awaitingUserResponse !== false,
+        async_task_count: tasks.length,
+        running_subagent_count: subagents.filter(({ status }) => status === "running").length,
+        entries: tail.entries,
+        next_before_sequence: tail.nextBeforeSeq ?? null,
+      });
+      return bridgeResponseSchema.parse({
+        v: 2,
+        id: request.id,
+        op: request.op,
+        ok: true,
+        result,
+      });
+    }
 
     let sendStarted = false;
     try {
@@ -253,7 +310,7 @@ async function connectOnce(
 
         const now = Date.now();
         for (const [id, record] of state.recentRequests) {
-          if (now - record.seenAt > REQUEST_FRESHNESS_MS) state.recentRequests.delete(id);
+          if (now - record.seenAt > REPLAY_RETENTION_MS) state.recentRequests.delete(id);
         }
         const previous = state.recentRequests.get(request.id);
         const stale = Math.abs(now - request.issued_at_ms) > REQUEST_FRESHNESS_MS;
@@ -356,7 +413,7 @@ export async function runBridge(
     recentRequests: new Map(),
     replayGuard: await PersistentReplayGuard.open(
       config.channel,
-      REQUEST_FRESHNESS_MS,
+      REPLAY_RETENTION_MS,
       replayRoot,
     ),
   };

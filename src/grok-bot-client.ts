@@ -7,6 +7,8 @@ import { z } from "zod";
 const DEFAULT_SAND_ROOT = "/home/box/sand-data";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_TRANSCRIPT_ENTRIES = 50;
+const MAX_STATUS_ROWS = 500;
 
 const discoveryFileSchema = z
   .object({
@@ -29,10 +31,53 @@ const agentSchema = z
     name: z.string().max(512),
     isGroup: z.boolean(),
     isRunning: z.boolean().optional(),
+    isComposingMessage: z.boolean().optional(),
+    awaitingUserResponse: z.unknown().optional(),
+    lastMessageId: z.string().min(1).max(512).nullable().optional(),
+    newestEntryId: z.string().min(1).max(512).nullable().optional(),
   })
   .passthrough();
 
 const sendResultSchema = z.object({ accepted: z.literal(true) }).passthrough();
+
+const transcriptTailInputSchema = z
+  .object({
+    id: z.string().min(1).max(512),
+    limit: z.number().int().min(1).max(MAX_TRANSCRIPT_ENTRIES),
+    beforeSeq: z.number().int().nonnegative().safe().optional(),
+  })
+  .strict();
+
+const transcriptTailSchema = z
+  .object({
+    entries: z.array(z.unknown()).max(MAX_TRANSCRIPT_ENTRIES),
+    nextBeforeSeq: z.number().int().nonnegative().safe().optional(),
+  })
+  .passthrough();
+
+const asyncTaskSchema = z
+  .object({
+    kind: z.enum(["subagent", "shell", "cloud-agent"]),
+    id: z.string().min(1).max(512),
+    label: z.string().max(4_096),
+    status: z.literal("running"),
+    startedAtMs: z.number().nonnegative().finite(),
+    detail: z.string().max(16_384).optional(),
+    subagentType: z.string().max(512).optional(),
+  })
+  .passthrough();
+
+const subagentSchema = z
+  .object({
+    subagentId: z.string().min(1).max(512),
+    subagentType: z.string().max(512),
+    title: z.string().max(4_096),
+    status: z.string().max(512),
+    startedAtMs: z.number().nonnegative().finite(),
+  })
+  .passthrough();
+
+const agentIdInputSchema = z.object({ id: z.string().min(1).max(512) }).strict();
 
 export type LocalGatewayDiscovery = {
   port: number;
@@ -42,6 +87,10 @@ export type LocalGatewayDiscovery = {
 
 export type LocalGatewayHealth = z.infer<typeof healthSchema>;
 export type LocalAgentSummary = z.infer<typeof agentSchema>;
+export type LocalTranscriptTailInput = z.infer<typeof transcriptTailInputSchema>;
+export type LocalTranscriptTail = z.infer<typeof transcriptTailSchema>;
+export type LocalAsyncTask = z.infer<typeof asyncTaskSchema>;
+export type LocalSubagent = z.infer<typeof subagentSchema>;
 export type LocalSendPromptInput = {
   agentId: string;
   prompt: string;
@@ -372,6 +421,42 @@ export class LocalGrokBotClient {
       },
       true,
       sendResultSchema,
+    );
+  }
+
+  async getAgentTranscriptTail(input: LocalTranscriptTailInput): Promise<LocalTranscriptTail> {
+    const body = transcriptTailInputSchema.safeParse(input);
+    if (!body.success) throw new LocalGatewayError("CONFIG_INVALID", 0, "");
+    return await this.#request(
+      "POST",
+      "/api/getAgentTranscriptTail",
+      body.data,
+      true,
+      transcriptTailSchema,
+    );
+  }
+
+  async getAsyncTasks(input: { id: string }): Promise<LocalAsyncTask[]> {
+    const body = agentIdInputSchema.safeParse(input);
+    if (!body.success) throw new LocalGatewayError("CONFIG_INVALID", 0, "");
+    return await this.#request(
+      "POST",
+      "/api/getAsyncTasks",
+      body.data,
+      true,
+      z.array(asyncTaskSchema).max(MAX_STATUS_ROWS),
+    );
+  }
+
+  async getSubagents(input: { id: string }): Promise<LocalSubagent[]> {
+    const body = agentIdInputSchema.safeParse(input);
+    if (!body.success) throw new LocalGatewayError("CONFIG_INVALID", 0, "");
+    return await this.#request(
+      "POST",
+      "/api/getSubagents",
+      body.data,
+      true,
+      z.array(subagentSchema).max(MAX_STATUS_ROWS),
     );
   }
 

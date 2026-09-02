@@ -31,22 +31,22 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
 
 export class PersistentReplayGuard {
   readonly #directory: string;
-  readonly #freshnessMs: number;
+  readonly #retentionMs: number;
 
-  private constructor(directory: string, freshnessMs: number) {
+  private constructor(directory: string, retentionMs: number) {
     this.#directory = directory;
-    this.#freshnessMs = freshnessMs;
+    this.#retentionMs = retentionMs;
   }
 
   static async open(
     channel: string,
-    freshnessMs: number,
+    retentionMs: number,
     root = defaultReplayRoot(),
   ): Promise<PersistentReplayGuard> {
     await ensurePrivateDirectory(root);
     const directory = join(root, `channel-${channel}`);
     await ensurePrivateDirectory(directory);
-    const guard = new PersistentReplayGuard(directory, freshnessMs);
+    const guard = new PersistentReplayGuard(directory, retentionMs);
     await guard.#prune(Date.now());
     return guard;
   }
@@ -99,7 +99,7 @@ export class PersistentReplayGuard {
         ) {
           throw new BridgeReplayError();
         }
-        if (now - details.mtimeMs > this.#freshnessMs) await unlink(path);
+        if (now - details.mtimeMs > this.#retentionMs) await unlink(path);
       } catch (caught) {
         if (isNodeError(caught) && caught.code === "ENOENT") continue;
         if (caught instanceof BridgeReplayError) throw caught;

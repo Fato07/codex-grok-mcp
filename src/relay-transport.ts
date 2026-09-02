@@ -9,9 +9,10 @@ import {
 } from "./grok-bot-gateway.js";
 import { decryptFrame, encryptFrame, type PairingConfig } from "./bridge-pairing.js";
 
-const RELAY_TIMEOUT_MS = 15_000;
+export const RELAY_TIMEOUT_MS = 15_000;
 const MAX_RELAY_FRAME_BYTES = 128 * 1024;
 const PEER_UNAVAILABLE_CLOSE_CODE = 4404;
+const INVALID_FRAME_CLOSE_CODE = 4400;
 
 const remoteErrorMessages: Record<BridgeErrorCode, string> = {
   AUTH_FAILED: "Grok Bot companion authentication failed.",
@@ -25,6 +26,7 @@ const remoteErrorMessages: Record<BridgeErrorCode, string> = {
   ROSTER_CHANGED: "The Grok Bot roster changed. List Bots again.",
   TIMEOUT: "Grok Bot companion request timed out.",
   UNAVAILABLE: "Grok Bot companion is unavailable.",
+  UPGRADE_REQUIRED: "Grok Bot companion must be updated and restarted to read Bots.",
 };
 
 function error(
@@ -149,11 +151,16 @@ async function requestRelay(
 
     socket.once("close", (code) => {
       const peerUnavailable = code === PEER_UNAVAILABLE_CLOSE_CODE;
+      const upgradeRequired = request.op === "read_bot" && code === INVALID_FRAME_CLOSE_CODE;
       finish({
         kind: "reject",
         value: error(
-          "UNAVAILABLE",
-          peerUnavailable ? "Grok Bot companion is offline." : "Grok Bot relay connection closed.",
+          upgradeRequired ? "UPGRADE_REQUIRED" : "UNAVAILABLE",
+          upgradeRequired
+            ? "Grok Bot companion rejected the read protocol. Update and restart the companion."
+            : peerUnavailable
+              ? "Grok Bot companion is offline."
+              : "Grok Bot relay connection closed.",
           {
             deliveryMayHaveOccurred: uncertain(),
             requestId: request.id,
@@ -210,6 +217,32 @@ export function createRelayTransport(config: PairingConfig): GrokBotTransport {
           throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
         }
         return response.result.bots;
+      });
+    },
+    async readBot(botId, options, signal) {
+      return runExclusive(async () => {
+        const response = await requestRelay(
+          config,
+          {
+            v: 2,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "read_bot",
+            args: {
+              bot_id: botId,
+              limit: options.limit,
+              ...(options.beforeSequence === undefined
+                ? {}
+                : { before_sequence: options.beforeSequence }),
+            },
+          },
+          signal,
+        );
+        if (!response.ok) throw remoteError(response);
+        if (response.op !== "read_bot") {
+          throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
+        }
+        return response.result;
       });
     },
     async sendMessage(botId: string, message: string, signal?: AbortSignal) {

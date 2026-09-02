@@ -47,7 +47,48 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
       } else if (request.url === "/api/listAgents") {
         response.end(
           JSON.stringify([
-            { id: "bot-1", name: "Ada", isGroup: false, isRunning: true },
+            {
+              id: "bot-1",
+              name: "Ada",
+              isGroup: false,
+              isRunning: true,
+              isComposingMessage: true,
+              awaitingUserResponse: null,
+              lastMessageId: "message-1",
+              newestEntryId: "entry-2",
+            },
+          ]),
+        );
+      } else if (request.url === "/api/getAgentTranscriptTail") {
+        response.end(
+          JSON.stringify({
+            entries: [{ seq: 2, id: "entry-2", kind: "message", entry: { private: true } }],
+            nextBeforeSeq: 2,
+            tailCount: 1,
+          }),
+        );
+      } else if (request.url === "/api/getAsyncTasks") {
+        response.end(
+          JSON.stringify([
+            {
+              kind: "shell",
+              id: "task-1",
+              label: "Build",
+              status: "running",
+              startedAtMs: 1,
+            },
+          ]),
+        );
+      } else if (request.url === "/api/getSubagents") {
+        response.end(
+          JSON.stringify([
+            {
+              subagentId: "subagent-1",
+              subagentType: "worker",
+              title: "Inspect",
+              status: "running",
+              startedAtMs: 2,
+            },
           ]),
         );
       } else {
@@ -94,20 +135,49 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
   assert.deepEqual(client.discovery(), { port: address.port, pid: 2468, hasToken: true });
   assert.deepEqual(verifiedServer, { pid: 2468, port: address.port, host: "127.0.0.1" });
   assert.deepEqual(await client.health(), { ok: true, isBusy: false });
-  assert.equal((await client.listAgents())[0].id, "bot-1");
+  assert.deepEqual(await client.listAgents(), [
+    {
+      id: "bot-1",
+      name: "Ada",
+      isGroup: false,
+      isRunning: true,
+      isComposingMessage: true,
+      awaitingUserResponse: null,
+      lastMessageId: "message-1",
+      newestEntryId: "entry-2",
+    },
+  ]);
+  assert.deepEqual(
+    await client.getAgentTranscriptTail({ id: "bot-1", limit: 10, beforeSeq: 3 }),
+    {
+      entries: [{ seq: 2, id: "entry-2", kind: "message", entry: { private: true } }],
+      nextBeforeSeq: 2,
+      tailCount: 1,
+    },
+  );
+  assert.equal((await client.getAsyncTasks({ id: "bot-1" }))[0].id, "task-1");
+  assert.equal((await client.getSubagents({ id: "bot-1" }))[0].subagentId, "subagent-1");
   assert.deepEqual(
     await client.sendPrompt({ agentId: "bot-1", prompt: "hello", clientNonce: "nonce-1" }),
     { accepted: true },
   );
   assert.equal(requests[0].authorization, undefined);
   assert.equal(requests[1].authorization, `Bearer ${token}`);
-  assert.equal(requests[2].authorization, `Bearer ${token}`);
+  assert(requests.slice(1).every((request) => request.authorization === `Bearer ${token}`));
   assert(requests.every((request) => request.slim === "1"));
-  assert.deepEqual(requests[2].body, {
+  assert.deepEqual(requests[2].body, { id: "bot-1", limit: 10, beforeSeq: 3 });
+  assert.deepEqual(requests[3].body, { id: "bot-1" });
+  assert.deepEqual(requests[4].body, { id: "bot-1" });
+  assert.deepEqual(requests[5].body, {
     agentId: "bot-1",
     prompt: "hello",
     clientNonce: "nonce-1",
   });
+
+  await assert.rejects(
+    client.getAgentTranscriptTail({ id: "bot-1", limit: 51 }),
+    { code: "CONFIG_INVALID" },
+  );
 
   mode = "oversized";
   await assert.rejects(client.listAgents(), { code: "OUTPUT_LIMIT" });

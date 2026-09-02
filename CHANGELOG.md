@@ -11,10 +11,11 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - A metadata-only live VM probe verified local gateway discovery, authentication, and a full non-group roster on Node.js 20.19.2.
 - A legacy direct URL/token transport retained outside the default plugin wrapper for power users.
 - `grok_list_bots` for exact IDs, names, running state, and a roster fingerprint.
+- `grok_read_bot` for exact-ID, read-only activity snapshots and bounded sanitized recent text, with Bot-bound opaque pagination and explicit untrusted-content, no-correlation, and no-completion-claim boundaries.
 - `grok_send_bot_message` for one exact-ID send with a gateway-acceptance receipt.
 - `grok_ping_all_bots`: no-write preview, fingerprint-bound second call, native MCP user confirmation, then sequential `PING` sends with per-Bot receipts and no automatic retries.
 - Honest uncertain-write receipts: interrupted sends are `outcome_unknown`; cancellation leaves remaining Bots `not_attempted`.
-- Node-20-compatible loopback gateway client with bounded responses and no Node-22 SDK runtime dependency.
+- Node-20-compatible loopback gateway client with bounded responses, protocol-v2 read support, explicit `UPGRADE_REQUIRED` for older companions, and no Node-22 SDK runtime dependency.
 - Persistent replay prevention, cached replay receipts, and a process-wide send guard that survives relay reconnects.
 - Loopback gateway process verification and explicit relay observability disablement.
 
@@ -23,8 +24,9 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - Persistent named Grok Bot access still uses an unofficial upstream gateway and may break when Grok Bot changes.
 - The VM companion is foreground-only until survival across idle periods and computer updates is verified.
 - No hosted relay is deployed by this source change; users must deploy the included relay or supply a compatible one.
+- Bot activity and sanitized transcript order do not prove task completion or send/reply correlation.
 - Gateway acceptance does not prove a Bot replied, completed work, or persisted a message.
-- No live paired-message validation is claimed.
+- No live paired-read or paired-message validation is claimed.
 
 ## [0.1.0-alpha.1]
 

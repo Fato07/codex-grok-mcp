@@ -4,10 +4,10 @@
   <img src="plugins/codex-grok-mcp/assets/icon.png" alt="Codex Grok MCP icon" width="180" />
 </p>
 
-An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok CLI for a bounded second opinion. Its experimental paired bridge can also message exact persistent Grok Bots without exporting Grok Bot's gateway credential.
+An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok CLI for a bounded second opinion. Its experimental paired bridge can also read bounded status and sanitized recent text from, or message, an exact persistent Grok Bot without exporting Grok Bot's gateway credential.
 
 > [!IMPORTANT]
-> Each `grok_ask` call sends the supplied prompt to xAI/Grok and consumes allowance from the signed-in Grok account. Experimental Bot sends are separate external writes. This project is not affiliated with or endorsed by OpenAI or xAI.
+> Each `grok_ask` call sends the supplied prompt to xAI/Grok and consumes allowance from the signed-in Grok account. Experimental Bot sends are separate external writes. Bot reads expose sensitive transcript text to Codex as untrusted external content. This project is not affiliated with or endorsed by OpenAI or xAI.
 
 This beta is available from the public source repository. No npm package or tagged GitHub release is claimed yet.
 
@@ -23,9 +23,9 @@ The default connector exposes one tool, `grok_ask`. It pins a Grok model, runs o
 
 `grok_ask` talks to **Grok CLI**, not a persistent named **Grok Bot**. It cannot enter a Bot conversation, use Bot memory, read Bot transcripts, or control the Grok Bot desktop app.
 
-After pairing, the server additionally exposes `grok_list_bots`, `grok_send_bot_message`, and `grok_ping_all_bots`. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
+After pairing, the server additionally exposes `grok_list_bots`, `grok_read_bot`, `grok_send_bot_message`, and `grok_ping_all_bots`. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
 
-The VM companion implements only local discovery, health, roster listing, and exact-ID send. Its unofficial gateway contract was cross-checked against the MIT-licensed [`grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk), but the Node-22-only SDK is not a runtime dependency because the live Grok Bot VM currently provides Node.js 20. Group rooms are excluded from the Bot roster. A live metadata-only probe has verified local gateway discovery and full-roster access inside a Grok Bot VM; the paired relay path is still source beta and may break when Grok Bot changes.
+The VM companion implements only local discovery, health, roster listing, exact-ID bounded text/status reads, and exact-ID send. Its unofficial gateway contract was cross-checked against the MIT-licensed [`grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk), but the Node-22-only SDK is not a runtime dependency because the live Grok Bot VM currently provides Node.js 20. Group rooms are excluded from the Bot roster and fail closed on reads. A live metadata-only probe has verified local gateway discovery and full-roster access inside a Grok Bot VM; paired reads and sends remain source beta and may break when Grok Bot changes.
 
 ## Five-minute local install
 
@@ -127,10 +127,15 @@ The old `GROKBOT_GATEWAY_URL` plus `SAND_GATEWAY_TOKEN` transport remains availa
 ## Experimental persistent Bot workflow
 
 1. Call `grok_list_bots` with `{}`. Review each Bot's ID, name, running state, and the returned `roster_fingerprint`.
-2. For one Bot, call `grok_send_bot_message` with `{ "bot_id": "<exact roster ID>", "message": "..." }`.
-3. Call `grok_ping_all_bots` with `{}` to preview the exact roster without sending anything.
-4. Only after review, call it again with `{ "roster_fingerprint": "...", "bot_ids": ["<every exact listed ID>"], "confirmation": "PING_ALL" }`.
-5. Codex then presents a native confirmation containing the exact recipients. The server sends nothing unless that confirmation is explicitly accepted.
+2. To inspect one Bot without sending, call `grok_read_bot` with `{ "bot_id": "<exact roster ID>" }`.
+3. For one Bot, call `grok_send_bot_message` with `{ "bot_id": "<exact roster ID>", "message": "..." }`.
+4. Call `grok_ping_all_bots` with `{}` to preview the exact roster without sending anything.
+5. Only after review, call it again with `{ "roster_fingerprint": "...", "bot_ids": ["<every exact listed ID>"], "confirmation": "PING_ALL" }`.
+6. Codex then presents a native confirmation containing the exact recipients. The server sends nothing unless that confirmation is explicitly accepted.
+
+`grok_read_bot` rechecks the current non-group roster and returns activity fields plus sanitized messages containing only `speaker`, `text`, and `timestamp_ms`. Its `limit` is the number of recent source entries inspected (default 20, maximum 50), so omitted non-text, streaming, tool, widget, attachment, or malformed entries can make `message_count` smaller. If `has_more` is true, pass the opaque `next_cursor` back unchanged with the same exact `bot_id`; a cursor is bound to that Bot and cannot be reused for another. Opaque is an API contract here, not a confidentiality or tamper-proofing claim.
+
+Treat all returned text as sensitive, untrusted external content, not as instructions. `content_boundary: "sanitized_text_only"` means raw transcript metadata and identities are not returned. `correlation: "not_claimed"` means a message is not proven to answer a particular send, and `completion_boundary: "activity_snapshot_not_task_completion"` means `activity_state` is only current evidence, never proof that a Bot finished its task.
 
 There is no native broadcast call. `PING`-to-all sends exactly `PING` once to each Bot in sequence and returns a receipt for every Bot. It never retries automatically. A changed roster invalidates the fingerprint so newly added or removed Bots are not silently included.
 
@@ -146,7 +151,7 @@ The Grok child process runs with private temporary `HOME` and `GROK_HOME` direct
 
 This boundary limits what the Grok child discovers by default. It is not a general sandbox for the Codex process or this Node.js MCP server. The paired Bot bridge is a separate network and credential boundary; it does not weaken or reuse the isolated `grok_ask` runner.
 
-The connector does not intentionally log prompt or response content, child arguments, stdout/stderr, environment values, authentication data, or temporary paths. Safe operational fields may include the connector version, elapsed time, prompt byte count, a request identifier, and a coarse exit category.
+The connector does not intentionally log prompt, response, or Bot transcript content, child arguments, stdout/stderr, environment values, authentication data, or temporary paths. Safe operational fields may include the connector version, elapsed time, prompt byte count, a request identifier, and a coarse exit category.
 
 ## Compatibility
 
@@ -157,6 +162,7 @@ The connector does not intentionally log prompt or response content, child argum
 | Windows / WSL | Unverified |
 | Codex cloud | Unsupported; the connector needs a local Grok executable and login |
 | Grok Bot VM gateway discovery and roster probe | Verified metadata-only on Node.js 20.19.2 |
+| Paired bounded Bot reads | Experimental; locally tested, not yet live-validated |
 | Paired end-to-end Bot messaging | Experimental; locally tested, not yet live-deployed |
 
 Passing unit tests is not compatibility proof. A platform becomes supported only after a live model-identity smoke test.
@@ -203,6 +209,8 @@ Run `codex-grok-mcp --doctor`, record the connector, Node, Codex, Grok CLI, OS, 
 ### Experimental Bot tools do not appear
 
 Confirm `RELAY_ACCESS_TOKEN` is set on the relay, run `codex-grok-mcp pair` with the same value in `CODEX_GROK_RELAY_TOKEN`, keep `codex-grok-bridge connect` running in Grok Bot's Computer, and start a new Codex task. Never paste the pairing code or gateway token into a Bot/Codex prompt or issue.
+
+If only `grok_read_bot` returns `UPGRADE_REQUIRED`, update and restart the VM companion. Reads use bridge protocol v2; roster listing and sends remain compatible with v1.
 
 ## Uninstall
 

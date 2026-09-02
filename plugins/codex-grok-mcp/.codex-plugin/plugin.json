@@ -14,8 +14,8 @@
   ],
   "interface": {
     "displayName": "Codex Grok MCP",
-    "shortDescription": "Ask Grok; optionally message Grok Bots.",
-    "longDescription": "Unofficial local bridge for bounded Grok CLI second opinions and opt-in end-to-end encrypted messaging to persistent Grok Bots.",
+    "shortDescription": "Ask Grok; read or message Grok Bots.",
+    "longDescription": "Unofficial local bridge for bounded Grok CLI second opinions and opt-in end-to-end encrypted reads and messaging with persistent Grok Bots.",
     "developerName": "Fato07",
     "category": "Developer Tools",
     "capabilities": [],
@@ -25,7 +25,8 @@
     "defaultPrompt": [
       "Ask Grok to challenge this architecture.",
       "Get a second review of this patch from Grok.",
-      "List my persistent Grok Bots."
+      "List my persistent Grok Bots.",
+      "Read the latest status from one Grok Bot."
     ]
   },
   "mcpServers": "./.mcp.json"

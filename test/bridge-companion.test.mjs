@@ -18,6 +18,7 @@ import {
   parsePairCode,
 } from "../dist/bridge-pairing.js";
 import { PersistentReplayGuard } from "../dist/bridge-replay.js";
+import { LocalGatewayError } from "../dist/grok-bot-client.js";
 
 test("probe emits only allowlisted metadata and sanitizes failures", async () => {
   const botId = "00000000-0000-4000-8000-0000000000a1";
@@ -240,7 +241,7 @@ test("an in-flight gateway send blocks a second send after relay reconnect", asy
   }
 });
 
-test("persistent replay state blocks a captured send after companion restart", async () => {
+test("positive-clock-skew replay stays blocked in-process and after restart", async () => {
   const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-replay-"));
   const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(relay, "listening");
@@ -264,42 +265,88 @@ test("persistent replay state blocks a captured send after companion restart", a
   const request = {
     v: 1,
     id: randomUUID(),
-    issued_at_ms: Date.now(),
+    issued_at_ms: Date.now() + 59_000,
     op: "send_message",
     args: { bot_id: "bot-1", message: "send once across restarts" },
   };
   const frame = encryptFrame(config, "codex", JSON.stringify(request));
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
 
   const firstController = new AbortController();
   const firstRun = runBridge(config, client, firstController.signal, replayRoot);
-  const [firstSocket] = await once(relay, "connection");
-  let response = once(firstSocket, "message");
-  firstSocket.send(frame);
-  await response;
-  firstController.abort();
-  await firstRun;
-
-  const secondController = new AbortController();
-  const secondRun = runBridge(config, client, secondController.signal, replayRoot);
+  let sameProcessResult;
+  let sameProcessSendCount;
+  let restartResult;
+  let secondController;
+  let secondRun;
   try {
+    const [firstSocket] = await once(relay, "connection");
+    let response = once(firstSocket, "message");
+    firstSocket.send(frame);
+    await response;
+    now += 61_000;
+    response = once(firstSocket, "message");
+    firstSocket.send(frame);
+    const [sameProcessData] = await response;
+    sameProcessResult = JSON.parse(
+      decryptFrame(config, "bridge", sameProcessData.toString()).toString("utf8"),
+    );
+    sameProcessSendCount = sends.length;
+    firstController.abort();
+    await firstRun;
+
+    secondController = new AbortController();
+    secondRun = runBridge(config, client, secondController.signal, replayRoot);
     const [secondSocket] = await once(relay, "connection");
     response = once(secondSocket, "message");
     secondSocket.send(frame);
     const [data] = await response;
-    const result = JSON.parse(
+    restartResult = JSON.parse(
       decryptFrame(config, "bridge", data.toString()).toString("utf8"),
     );
-    assert.equal(result.ok, false);
-    assert.equal(result.error.code, "INVALID_RESPONSE");
-    assert.equal(result.error.delivery_may_have_occurred, true);
-    assert.equal(sends.length, 1);
   } finally {
-    secondController.abort();
+    firstController.abort();
+    secondController?.abort();
+    await firstRun;
     await secondRun;
+    Date.now = realNow;
     await new Promise((resolve, reject) => {
       relay.close((caught) => (caught ? reject(caught) : resolve()));
     });
     await rm(replayRoot, { recursive: true, force: true });
+  }
+  assert.equal(sameProcessResult.ok, true);
+  assert.equal(sameProcessSendCount, 1);
+  assert.equal(restartResult.ok, false);
+  assert.equal(restartResult.error.code, "INVALID_RESPONSE");
+  assert.equal(restartResult.error.delivery_may_have_occurred, true);
+  assert.equal(sends.length, 1);
+});
+
+test("companion marks every post-send gateway status as delivery-uncertain", async () => {
+  for (const status of [400, 401, 403, 404, 413, 422]) {
+    const requestId = randomUUID();
+    const result = await handleBridgeRequest(
+      {
+        listAgents: async () => [
+          { id: "bot-1", name: "Ada", isGroup: false, isRunning: true },
+        ],
+        sendPrompt: async () => {
+          throw new LocalGatewayError("GATEWAY_REJECTED", status, requestId);
+        },
+      },
+      {
+        v: 1,
+        id: requestId,
+        issued_at_ms: Date.now(),
+        op: "send_message",
+        args: { bot_id: "bot-1", message: "send once" },
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.error.delivery_may_have_occurred, true, `HTTP ${status}`);
   }
 });
 
@@ -395,4 +442,122 @@ test("companion pairs without echoing the code and validates exact Bot IDs befor
   assert.deepEqual(sends, [
     { agentId: bot.id, prompt: "hello", clientNonce: requestId },
   ]);
+});
+
+test("companion returns a bounded sanitized read-only Bot snapshot", async () => {
+  const bot = {
+    id: "bot-1",
+    name: "Ada",
+    isGroup: false,
+    isRunning: true,
+    isComposingMessage: false,
+    awaitingUserResponse: { kind: "question" },
+  };
+  const transcriptCalls = [];
+  let entries = [
+    { seq: 1, id: "user-1", kind: "message", role: "user", content: "status?", timestampMs: 10 },
+    { seq: 2, kind: "message", role: "assistant", content: "partial", streaming: true },
+    { seq: 3, kind: "tool-call", name: "shell", input: "private" },
+    { seq: 4, kind: "send-message", message: { type: "widget", content: "private" } },
+    {
+      seq: 5,
+      entry: {
+        kind: "message",
+        role: "assistant",
+        content: "working\r\nsa\u0000\u009fe\u202e\u2066",
+        timestampMs: 20,
+      },
+    },
+    {
+      seq: 6,
+      kind: "send-message",
+      message: { type: "text", content: "peer update" },
+      author: { id: "peer-1", name: "Turing" },
+      timestampMs: 30,
+    },
+  ];
+  const client = {
+    discovery: () => ({ port: 1340, pid: 1, hasToken: true }),
+    health: async () => ({ ok: true, isBusy: false }),
+    listAgents: async () => [
+      bot,
+      { id: "group-1", name: "Room", isGroup: true, isRunning: false },
+    ],
+    getAgentTranscriptTail: async (input) => {
+      transcriptCalls.push(input);
+      return { entries, nextBeforeSeq: 1, tailCount: entries.length };
+    },
+    getAsyncTasks: async () => [{ status: "running" }, { status: "running" }],
+    getSubagents: async () => [{ status: "running" }, { status: "complete" }],
+    sendPrompt: async () => ({ accepted: true }),
+  };
+
+  const read = await handleBridgeRequest(client, {
+    v: 2,
+    id: randomUUID(),
+    issued_at_ms: Date.now(),
+    op: "read_bot",
+    args: { bot_id: bot.id, limit: 6, before_sequence: 7 },
+  });
+  assert.equal(read.ok, true);
+  assert.equal(read.v, 2);
+  assert.deepEqual(read.result, {
+    bot_id: bot.id,
+    is_running: true,
+    is_composing: false,
+    awaiting_user: true,
+    async_task_count: 2,
+    running_subagent_count: 1,
+    messages: [
+      { speaker: "user", text: "status?", timestamp_ms: 10 },
+      { speaker: "bot", text: "working\nsae", timestamp_ms: 20 },
+      { speaker: "peer", text: "peer update", timestamp_ms: 30 },
+    ],
+    next_before_sequence: 1,
+    truncated: false,
+  });
+  assert.deepEqual(transcriptCalls, [{ id: bot.id, limit: 6, beforeSeq: 7 }]);
+  assert(!JSON.stringify(read).includes("private"));
+
+  entries = [9, 10, 11, 12].map((seq) => ({
+    seq,
+    kind: "message",
+    role: "assistant",
+    content: "🙂".repeat(20_000),
+  }));
+  const bounded = await handleBridgeRequest(client, {
+    v: 2,
+    id: randomUUID(),
+    issued_at_ms: Date.now(),
+    op: "read_bot",
+    args: { bot_id: bot.id, limit: 4 },
+  });
+  assert.equal(bounded.ok, true);
+  assert.equal(bounded.result.truncated, true);
+  assert.equal(bounded.result.messages.length, 3);
+  assert.equal(bounded.result.next_before_sequence, 10);
+  assert(
+    bounded.result.messages.every(
+      ({ text }) => Buffer.byteLength(text, "utf8") <= 16 * 1024,
+    ),
+  );
+  assert(
+    bounded.result.messages.reduce(
+      (bytes, { text }) => bytes + Buffer.byteLength(text, "utf8"),
+      0,
+    ) <= 48 * 1024,
+  );
+  assert(Buffer.byteLength(JSON.stringify(bounded.result), "utf8") <= 64 * 1024);
+
+  const group = await handleBridgeRequest(client, {
+    v: 2,
+    id: randomUUID(),
+    issued_at_ms: Date.now(),
+    op: "read_bot",
+    args: { bot_id: "group-1", limit: 1 },
+  });
+  assert.equal(group.ok, false);
+  assert.equal(group.error.code, "BOT_NOT_FOUND");
+  assert.equal(group.v, 2);
+  assert.equal(transcriptCalls.length, 2);
 });
