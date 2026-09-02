@@ -5,15 +5,16 @@ Thanks for helping keep this bridge small, safe, and dependable.
 ## Before opening a change
 
 - Use an issue or discussion before adding tools, adapters, dependencies, authentication paths, or new supported platforms.
-- Keep the v1 boundary: one local Grok CLI tool, no persistent Grok Bot access, no credential extraction, and no silent API fallback.
+- Preserve the isolated `grok_ask` boundary. Experimental persistent Bot support must stay opt-in, separately paired, and unavailable without a validated private pairing file.
 - Never include credentials, `~/.grok/auth.json`, private prompts, responses, transcripts, or unredacted logs.
+- Never scrape Grok Bot app state, decrypt descriptors, read Keychain, or infer gateway credentials.
 
 ## Local setup
 
 ```bash
 npm ci
 npm run typecheck
-npm test
+npm run test:all
 npm run build
 npm run doctor
 ```
@@ -35,7 +36,7 @@ Before requesting review, run:
 
 ```bash
 npm run typecheck
-npm test
+npm run test:all
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/codex-grok-mcp
 ```
 
@@ -47,15 +48,17 @@ Mocks and unit tests are not platform proof. To add a supported compatibility ro
 
 ## New adapters and tools
 
-The core stays on the single `grok_ask` tool and documented interfaces. A new adapter needs:
+The core `grok_ask` tool stays isolated from optional adapters. A new adapter needs:
 
-- a documented, authorized upstream API;
+- a documented upstream contract and operator-authorized credentials or pairing;
 - an identified maintenance owner;
 - a separate explicit configuration path;
 - tests and threat-boundary documentation;
 - no scraping, Keychain extraction, internal gateway credentials, or silent fallback.
 
-Persistent Grok Bot integration is not accepted until an official inbound API exists or it is maintained as a clearly separate experimental project.
+Persistent Grok Bot integration is accepted only through an official inbound API or a clearly separated experimental adapter.
+
+The paired bridge is the narrow exception: its bounded local client discovers the loopback gateway only inside the Grok VM; the gateway token never leaves that VM; the self-hosted relay authenticates native clients before allocation and forwards only authenticated ciphertext; the companion exposes only roster listing and exact-ID sends. Preserve fingerprint-bound plus native-user-confirmed `PING`-to-all, sequential one-shot delivery, cached replay receipts, per-Bot receipts, no automatic retries, `outcome_unknown` for ambiguous sends, and `not_attempted` after cancellation. Keep the legacy URL/token transport out of the default plugin environment. Tests must use mock gateways/relays; distinguish metadata-only live probes from live message compatibility.
 
 ## Governance and license
 

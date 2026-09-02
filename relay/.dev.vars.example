@@ -1,0 +1,2 @@
+# Generate a unique value with: node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))'
+RELAY_ACCESS_TOKEN=

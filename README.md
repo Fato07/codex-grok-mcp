@@ -4,29 +4,35 @@
   <img src="plugins/codex-grok-mcp/assets/icon.png" alt="Codex Grok MCP icon" width="180" />
 </p>
 
-An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok CLI for a bounded second opinion.
+An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok CLI for a bounded second opinion. Its experimental paired bridge can also message exact persistent Grok Bots without exporting Grok Bot's gateway credential.
 
 > [!IMPORTANT]
-> Each call sends the supplied prompt to xAI/Grok and consumes allowance from the signed-in Grok account. This project is not affiliated with or endorsed by OpenAI or xAI.
+> Each `grok_ask` call sends the supplied prompt to xAI/Grok and consumes allowance from the signed-in Grok account. Experimental Bot sends are separate external writes. This project is not affiliated with or endorsed by OpenAI or xAI.
 
-This alpha is source-only. No npm or GitHub release is claimed yet.
+This beta is available from the public source repository. No npm package or tagged GitHub release is claimed yet.
 
 ## What it is
 
 ```text
 Codex -> local MCP server -> isolated Grok CLI -> xAI
+                           -> authenticated encrypted relay <- companion in Grok Bot VM
+                                                    -> local gateway -> named Bots
 ```
 
-The connector exposes one tool, `grok_ask`. It pins a Grok model, runs one turn without subagents, and always disables Grok web search.
+The default connector exposes one tool, `grok_ask`. It pins a Grok model, runs one turn without subagents, and always disables Grok web search.
 
-This talks to **Grok CLI**, not a persistent named **Grok Bot**. It cannot enter a Bot conversation, use Bot memory, read Bot transcripts, or control the Grok Bot desktop app.
+`grok_ask` talks to **Grok CLI**, not a persistent named **Grok Bot**. It cannot enter a Bot conversation, use Bot memory, read Bot transcripts, or control the Grok Bot desktop app.
+
+After pairing, the server additionally exposes `grok_list_bots`, `grok_send_bot_message`, and `grok_ping_all_bots`. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
+
+The VM companion implements only local discovery, health, roster listing, and exact-ID send. Its unofficial gateway contract was cross-checked against the MIT-licensed [`grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk), but the Node-22-only SDK is not a runtime dependency because the live Grok Bot VM currently provides Node.js 20. Group rooms are excluded from the Bot roster. A live metadata-only probe has verified local gateway discovery and full-roster access inside a Grok Bot VM; the paired relay path is still source beta and may break when Grok Bot changes.
 
 ## Five-minute local install
 
 Prerequisites:
 
-- macOS; this is the only platform verified for the alpha.
-- Node.js 22 or newer.
+- macOS; this is the only platform verified for the isolated CLI path in this beta.
+- Node.js 20.19.2 or newer.
 - Codex CLI/desktop.
 - Grok CLI installed and signed in. Confirm with `grok --version` and `grok models`.
 
@@ -47,7 +53,7 @@ Then open the Plugins Directory in the Codex desktop app, install **Codex Grok M
 Ask Grok to challenge this architecture and return the three strongest objections.
 ```
 
-The source alpha plugin runs the globally installed `codex-grok-mcp` executable. It does not download an unpublished package or modify Grok authentication. A published plugin release will instead pin an exact npm package version.
+The source beta plugin runs the globally installed `codex-grok-mcp` executable. It does not download an unpublished package or modify Grok authentication. A published plugin release will instead pin an exact npm package version.
 
 ## Direct Codex MCP setup
 
@@ -69,6 +75,39 @@ codex-grok-mcp --doctor
 
 Doctor checks local prerequisites and configuration without sending a prompt to Grok. It must not print authentication material.
 
+## Pair persistent Grok Bots
+
+The repository contains a small Cloudflare Durable Object relay in [`relay/`](relay/). It forwards opaque frames, stores no messages or credentials, hibernates while idle, and is not deployed automatically.
+
+Deploy your own relay, then pair Codex on the Mac. The same random master token must be set in Cloudflare and supplied once to the local pairing command. Pairing derives a channel-only bearer for both clients; the deployment master is not copied into the pair code or Grok VM, and neither credential appears in a relay URL.
+
+```bash
+cd relay
+npm ci
+RELAY_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))')"
+printf 'RELAY_ACCESS_TOKEN=%s\n' "$RELAY_TOKEN" | npx wrangler deploy --secrets-file /dev/stdin
+
+cd ..
+CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
+unset RELAY_TOKEN
+```
+
+The pairing command requires an interactive terminal and prints the credential only there. Keep it private. In **Grok Bot's Computer** terminal—not in a Bot chat—run the companion from an audited source tree or an exact immutable release and paste the code into the no-echo prompt:
+
+```bash
+cd /path/to/audited/codex-grok-mcp
+npm ci
+npm run build
+node dist/bridge-companion.js probe
+node dist/bridge-companion.js connect
+```
+
+Do not run a mutable GitHub default branch inside the credential-bearing VM. Once an npm release exists, the intended shortcut is `npx --yes --package=codex-grok-mcp@<exact-version> codex-grok-bridge ...`; this README does not claim that unpublished package is available yet.
+
+`probe` returns only gateway health, process metadata, Bot count, and a roster fingerprint. It never prints the gateway token, URL, Bot names, IDs, transcripts, or prompts.
+
+The source beta companion currently runs in the foreground. Keep that terminal running while using the Bot tools. Background survival across Grok VM idle periods and computer updates is not yet claimed. Pair again with `--force` to rotate the key; run `codex-grok-mcp unpair` and `codex-grok-bridge unpair` to revoke both local copies.
+
 ## Configuration
 
 Configuration is operator-owned and optional:
@@ -79,8 +118,25 @@ Configuration is operator-owned and optional:
 | `GROK_MCP_MODEL` | `grok-4.6` | `grok-4.6` or `grok-4.5` |
 | `GROK_MCP_TIMEOUT_MS` | `180000` | Integer from `5000` to `600000` |
 | `GROK_MCP_AUTH_PATH` | `~/.grok/auth.json` | Absolute or working-directory-relative auth file path |
+| `CODEX_GROK_RELAY_TOKEN` | none | Exact 32-byte base64url relay master; required only by the manual `pair` command and not copied into its output |
 
-The plugin passes only these connector-specific overrides through its MCP configuration. The connector itself supplies a narrow child environment for Grok CLI.
+The plugin passes only these connector-specific overrides through its MCP configuration. The connector itself supplies a narrow child environment for Grok CLI. Paired bridge configuration is stored locally in a mode-`0600` file under the user's configuration directory; it is never accepted as tool input.
+
+The old `GROKBOT_GATEWAY_URL` plus `SAND_GATEWAY_TOKEN` transport remains available only as a manual power-user fallback outside the plugin wrapper. Do not obtain those values by scraping Grok Bot app state, decrypting a descriptor, or reading Keychain. Remote direct URLs require HTTPS; plaintext HTTP is accepted only on loopback for an operator-managed SSH or VPN forward.
+
+## Experimental persistent Bot workflow
+
+1. Call `grok_list_bots` with `{}`. Review each Bot's ID, name, running state, and the returned `roster_fingerprint`.
+2. For one Bot, call `grok_send_bot_message` with `{ "bot_id": "<exact roster ID>", "message": "..." }`.
+3. Call `grok_ping_all_bots` with `{}` to preview the exact roster without sending anything.
+4. Only after review, call it again with `{ "roster_fingerprint": "...", "bot_ids": ["<every exact listed ID>"], "confirmation": "PING_ALL" }`.
+5. Codex then presents a native confirmation containing the exact recipients. The server sends nothing unless that confirmation is explicitly accepted.
+
+There is no native broadcast call. `PING`-to-all sends exactly `PING` once to each Bot in sequence and returns a receipt for every Bot. It never retries automatically. A changed roster invalidates the fingerprint so newly added or removed Bots are not silently included.
+
+The confirmed workflow is capped at 50 Bots so its sequential request budget fits the plugin timeout.
+
+A successful receipt has the completion boundary `gateway_accepted_not_bot_reply`: the gateway accepted that send, but this does not prove that the Bot replied, completed work, or persisted the message. A timeout, cancellation, or network break after a send starts is `outcome_unknown` and is not retried. Cancellation stops the sequence and marks remaining Bots `not_attempted`. Test one exact Bot before considering a confirmed all-Bot ping.
 
 ## Privacy and isolation boundary
 
@@ -88,7 +144,7 @@ Every `grok_ask` call deliberately crosses an external data boundary: the prompt
 
 The Grok child process runs with private temporary `HOME` and `GROK_HOME` directories. Only the existing authentication file—`~/.grok/auth.json` by default—is symlinked into the isolated `GROK_HOME`; the connector checks the file but does not read it. The rest of the user's `~/.grok` state—sessions, memory, plugins, logs, configuration, and Bot data—is not mounted into the child home. The connector removes its prompt file and temporary home after each call.
 
-This boundary limits what the Grok child discovers by default. It is not a general sandbox for the Codex process or this Node.js MCP server.
+This boundary limits what the Grok child discovers by default. It is not a general sandbox for the Codex process or this Node.js MCP server. The paired Bot bridge is a separate network and credential boundary; it does not weaken or reuse the isolated `grok_ask` runner.
 
 The connector does not intentionally log prompt or response content, child arguments, stdout/stderr, environment values, authentication data, or temporary paths. Safe operational fields may include the connector version, elapsed time, prompt byte count, a request identifier, and a coarse exit category.
 
@@ -96,11 +152,12 @@ The connector does not intentionally log prompt or response content, child argum
 
 | Environment | Status |
 |---|---|
-| macOS, current local Codex and Grok CLI | Verified target for `0.1.0-alpha.1` |
+| macOS, current local Codex and Grok CLI | Verified target for `0.2.0-beta.1` isolated CLI path |
 | Linux | Planned; unverified |
 | Windows / WSL | Unverified |
 | Codex cloud | Unsupported; the connector needs a local Grok executable and login |
-| Persistent named Grok Bot | Unsupported by design |
+| Grok Bot VM gateway discovery and roster probe | Verified metadata-only on Node.js 20.19.2 |
+| Paired end-to-end Bot messaging | Experimental; locally tested, not yet live-deployed |
 
 Passing unit tests is not compatibility proof. A platform becomes supported only after a live model-identity smoke test.
 
@@ -143,6 +200,10 @@ Run `codex plugin marketplace list`, confirm the local marketplace path, install
 
 Run `codex-grok-mcp --doctor`, record the connector, Node, Codex, Grok CLI, OS, and architecture versions, and report a bug with redacted output. Never attach `~/.grok/auth.json`, prompts, responses, or transcripts.
 
+### Experimental Bot tools do not appear
+
+Confirm `RELAY_ACCESS_TOKEN` is set on the relay, run `codex-grok-mcp pair` with the same value in `CODEX_GROK_RELAY_TOKEN`, keep `codex-grok-bridge connect` running in Grok Bot's Computer, and start a new Codex task. Never paste the pairing code or gateway token into a Bot/Codex prompt or issue.
+
 ## Uninstall
 
 If installed as a plugin, uninstall **Codex Grok MCP** in the Codex desktop app, then remove the local marketplace:
@@ -158,6 +219,13 @@ If configured directly, remove that MCP entry too:
 codex mcp remove grok
 ```
 
+Remove both pairing files before uninstalling:
+
+```bash
+codex-grok-mcp unpair
+codex-grok-bridge unpair
+```
+
 Uninstalling does not change or delete Grok CLI authentication or account data.
 
 ## Development
@@ -165,11 +233,11 @@ Uninstalling does not change or delete Grok CLI authentication or account data.
 ```bash
 npm ci
 npm run typecheck
-npm test
+npm run test:all
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a change.
 
 ## License and attribution
 
-MIT. The process-runner design was informed by the MIT-licensed [`libraz/grok-mcp`](https://github.com/libraz/grok-mcp); see repository history and any accompanying notices for exact reused code if applicable.
+MIT. The process-runner design was informed by the MIT-licensed [`libraz/grok-mcp`](https://github.com/libraz/grok-mcp). The bounded Grok Bot gateway contract was cross-checked against the MIT-licensed [`Adam91holt/grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk). See repository history and accompanying notices for exact reused or adapted code if applicable.

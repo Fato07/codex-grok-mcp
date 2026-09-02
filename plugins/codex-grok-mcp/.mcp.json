@@ -10,7 +10,7 @@
         "GROK_MCP_AUTH_PATH"
       ],
       "tool_timeout_sec": 610,
-      "note": "Unofficial local bridge. Each tool call sends the supplied prompt to xAI/Grok and consumes account allowance."
+      "note": "Unofficial local bridge. grok_ask consumes Grok allowance; paired Bot messaging is experimental, encrypted end-to-end, and never retries sends automatically."
     }
   }
 }

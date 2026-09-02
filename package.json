@@ -1,7 +1,7 @@
 {
   "name": "codex-grok-mcp",
-  "version": "0.1.0-alpha.1",
-  "description": "Unofficial local MCP bridge from Codex and other MCP clients to Grok CLI.",
+  "version": "0.2.0-beta.1",
+  "description": "Unofficial local MCP bridge from Codex to isolated Grok calls and experimental persistent Grok Bots.",
   "author": "Fato07",
   "repository": {
     "type": "git",
@@ -14,26 +14,40 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "codex-grok-mcp": "dist/index.js"
+    "codex-grok-mcp": "dist/index.js",
+    "codex-grok-bridge": "dist/bridge-companion.js"
   },
   "files": [
     "dist",
     "plugins/codex-grok-mcp/assets/icon.png",
+    "relay/.dev.vars.example",
+    "relay/README.md",
+    "relay/package-lock.json",
+    "relay/package.json",
+    "relay/src",
+    "relay/test",
+    "relay/tsconfig.json",
+    "relay/vitest.config.ts",
+    "relay/worker-configuration.d.ts",
+    "relay/wrangler.jsonc",
     "CONTRIBUTING.md",
     "LICENSE",
     "README.md",
     "SECURITY.md"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=20.19.2"
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
+    "bridge:probe": "node dist/bridge-companion.js probe",
     "doctor": "node dist/index.js --doctor",
-    "test": "npm run build && node --test",
-    "prepack": "npm run build"
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:relay": "npm --prefix relay test",
+    "test:all": "npm test && npm run test:relay",
+    "prepare": "npm run build"
   },
   "keywords": [
     "codex",
@@ -45,10 +59,12 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
+    "ws": "8.21.3",
     "zod": "4.5.4"
   },
   "devDependencies": {
-    "@types/node": "22.19.0",
+    "@types/node": "20.19.43",
+    "@types/ws": "8.18.1",
     "typescript": "7.0.2"
   }
 }

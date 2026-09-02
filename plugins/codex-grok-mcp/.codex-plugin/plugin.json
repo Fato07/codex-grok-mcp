@@ -1,7 +1,7 @@
 {
   "name": "codex-grok-mcp",
-  "version": "0.1.0-alpha.1+codex.20260902142700",
-  "description": "Unofficial local bridge for asking Grok CLI from Codex.",
+  "version": "0.2.0-beta.1+codex.20260902171538",
+  "description": "Unofficial local bridge for isolated Grok calls and paired persistent Grok Bots.",
   "author": {
     "name": "Fato07"
   },
@@ -14,8 +14,8 @@
   ],
   "interface": {
     "displayName": "Codex Grok MCP",
-    "shortDescription": "Ask Grok CLI for a bounded second opinion.",
-    "longDescription": "Unofficial local bridge that sends explicitly requested prompts from Codex to the authenticated Grok CLI.",
+    "shortDescription": "Ask Grok; optionally message Grok Bots.",
+    "longDescription": "Unofficial local bridge for bounded Grok CLI second opinions and opt-in end-to-end encrypted messaging to persistent Grok Bots.",
     "developerName": "Fato07",
     "category": "Developer Tools",
     "capabilities": [],
@@ -25,7 +25,7 @@
     "defaultPrompt": [
       "Ask Grok to challenge this architecture.",
       "Get a second review of this patch from Grok.",
-      "Ask Grok for the strongest counterargument."
+      "List my persistent Grok Bots."
     ]
   },
   "mcpServers": "./.mcp.json"
