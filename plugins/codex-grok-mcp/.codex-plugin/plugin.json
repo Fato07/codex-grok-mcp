@@ -1,6 +1,6 @@
 {
   "name": "codex-grok-mcp",
-  "version": "0.2.0-beta.1+codex.20260902233625",
+  "version": "0.2.0-beta.1+codex.20260902234442",
   "description": "Unofficial local bridge for isolated Grok calls and paired persistent Grok Bots.",
   "author": {
     "name": "Fato07"
@@ -23,8 +23,7 @@
     "composerIcon": "./assets/icon.png",
     "logo": "./assets/icon.png",
     "defaultPrompt": [
-      "Ask Grok to challenge this architecture.",
-      "Get a second review of this patch from Grok.",
+      "Ask Grok to challenge this architecture or review this patch.",
       "List my persistent Grok Bots.",
       "Read the latest status from one Grok Bot."
     ]
