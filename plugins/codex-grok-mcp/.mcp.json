@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "grok": {
+      "command": "codex-grok-mcp",
+      "args": [],
+      "env_vars": [
+        "GROK_MCP_BIN",
+        "GROK_MCP_MODEL",
+        "GROK_MCP_TIMEOUT_MS",
+        "GROK_MCP_AUTH_PATH"
+      ],
+      "tool_timeout_sec": 610,
+      "note": "Unofficial local bridge. Each tool call sends the supplied prompt to xAI/Grok and consumes account allowance."
+    }
+  }
+}

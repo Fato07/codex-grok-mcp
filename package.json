@@ -1,0 +1,54 @@
+{
+  "name": "codex-grok-mcp",
+  "version": "0.1.0-alpha.1",
+  "description": "Unofficial local MCP bridge from Codex and other MCP clients to Grok CLI.",
+  "author": "Fato07",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fato07/codex-grok-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Fato07/codex-grok-mcp/issues"
+  },
+  "homepage": "https://github.com/Fato07/codex-grok-mcp#readme",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "codex-grok-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "plugins/codex-grok-mcp/assets/icon.png",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "doctor": "node dist/index.js --doctor",
+    "test": "npm run build && node --test",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "codex",
+    "grok",
+    "xai",
+    "mcp",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "typescript": "7.0.2"
+  }
+}

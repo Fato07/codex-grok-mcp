@@ -1,0 +1,32 @@
+{
+  "name": "codex-grok-mcp",
+  "version": "0.1.0-alpha.1+codex.20260902142700",
+  "description": "Unofficial local bridge for asking Grok CLI from Codex.",
+  "author": {
+    "name": "Fato07"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "grok",
+    "mcp",
+    "local"
+  ],
+  "interface": {
+    "displayName": "Codex Grok MCP",
+    "shortDescription": "Ask Grok CLI for a bounded second opinion.",
+    "longDescription": "Unofficial local bridge that sends explicitly requested prompts from Codex to the authenticated Grok CLI.",
+    "developerName": "Fato07",
+    "category": "Developer Tools",
+    "capabilities": [],
+    "brandColor": "#7C3AED",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png",
+    "defaultPrompt": [
+      "Ask Grok to challenge this architecture.",
+      "Get a second review of this patch from Grok.",
+      "Ask Grok for the strongest counterargument."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
