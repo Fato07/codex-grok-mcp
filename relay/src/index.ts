@@ -2,6 +2,8 @@ import { DurableObject } from "cloudflare:workers";
 
 const CHANNEL_PATTERN = /^[A-Za-z0-9_-]{21}[AQgw]$/;
 const MAX_FRAME_BYTES = 128 * 1024;
+const INVALID_FRAME_CLOSE_CODE = 4400;
+const PEER_UNAVAILABLE_CLOSE_CODE = 4404;
 const TEXT_ENCODER = new TextEncoder();
 
 type Role = "codex" | "bridge";
@@ -104,7 +106,7 @@ export class Relay extends DurableObject<RelayEnv> {
       .find((candidate) => candidate.readyState === WebSocket.OPEN);
 
     if (!peer) {
-      close(socket, 4404, "peer unavailable");
+      close(socket, PEER_UNAVAILABLE_CLOSE_CODE, "peer unavailable");
       return;
     }
 
@@ -116,7 +118,22 @@ export class Relay extends DurableObject<RelayEnv> {
     peer.send(message);
   }
 
-  webSocketClose(_socket: WebSocket, _code: number, _reason: string, _wasClean: boolean): void {}
+  webSocketClose(socket: WebSocket, code: number, _reason: string, _wasClean: boolean): void {
+    const role: unknown = socket.deserializeAttachment();
+    if (role !== "bridge") return;
+
+    const peer = this.ctx
+      .getWebSockets("codex")
+      .find((candidate) => candidate.readyState === WebSocket.OPEN);
+    if (!peer) return;
+
+    const rejectedFrame = code === INVALID_FRAME_CLOSE_CODE;
+    close(
+      peer,
+      rejectedFrame ? INVALID_FRAME_CLOSE_CODE : PEER_UNAVAILABLE_CLOSE_CODE,
+      rejectedFrame ? "peer rejected frame" : "peer unavailable",
+    );
+  }
 
   webSocketError(socket: WebSocket, _error: unknown): void {
     close(socket, 1011, "websocket error");

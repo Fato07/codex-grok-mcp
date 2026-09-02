@@ -117,7 +117,11 @@ it("validates, routes opaque frames, caps frames, reports availability, and repl
   expect((await cappedClose).code).toBe(1009);
   expect(oversizedForwarded).toBe(false);
 
-  replacement.close(1000, "done");
-  bridge.close(1000, "done");
+  const rejectedByCompanion = event(replacement, "close");
+  bridge.close(4400, "untrusted detail");
+  const rejection = await rejectedByCompanion;
+  expect(rejection.code).toBe(4400);
+  expect(rejection.reason).toBe("peer rejected frame");
+
   cappedPeer.close(1000, "done");
 });
