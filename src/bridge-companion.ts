@@ -22,6 +22,7 @@ import {
 } from "./bridge-protocol.js";
 import {
   decryptFrame,
+  defaultBridgeConfigPath,
   encryptFrame,
   loadPairingConfig,
   parsePairCode,
@@ -30,6 +31,13 @@ import {
   type PairingConfig,
 } from "./bridge-pairing.js";
 import { PersistentReplayGuard } from "./bridge-replay.js";
+import { BridgeRuntimeError, CompanionLease } from "./bridge-runtime.js";
+import {
+  BRIDGE_CAPABILITIES,
+  BRIDGE_PROTOCOL_VERSIONS,
+  BRIDGE_STATUS_PROTOCOL_VERSION,
+  CODEX_GROK_VERSION,
+} from "./version.js";
 
 const PROBE_TIMEOUT_MS = 5_000;
 const BRIDGE_GATEWAY_TIMEOUT_MS = 10_000;
@@ -58,6 +66,7 @@ export type BridgeProbeClient = {
 };
 
 export type BridgeClient = BridgeProbeClient & {
+  withGatewaySnapshot?<T>(operation: () => Promise<T>): Promise<T>;
   getAgentTranscriptTail(input: {
     id: string;
     limit: number;
@@ -177,84 +186,111 @@ export async function handleBridgeRequest(
   request: BridgeRequest,
 ): Promise<BridgeResponse> {
   try {
-    const agents = await client.listAgents();
-    const bots = agents
-      .filter((agent) => !agent.isGroup)
-      .map((agent) => ({ id: agent.id, name: agent.name, is_running: agent.isRunning ?? null }));
-
-    if (request.op === "list_bots") {
-      return bridgeResponseSchema.parse({
-        v: 1,
-        id: request.id,
-        op: request.op,
-        ok: true,
-        result: { bots },
-      });
-    }
-
-    const bot = bots.find((candidate) => candidate.id === request.args.bot_id);
-    if (bot === undefined) return responseError(request, "BOT_NOT_FOUND", false);
-
-    if (request.op === "read_bot") {
-      const agent = agents.find((candidate) => candidate.id === bot.id);
-      if (agent === undefined) return responseError(request, "BOT_NOT_FOUND", false);
-      const [tail, tasks, subagents] = await Promise.all([
-        client.getAgentTranscriptTail({
-          id: bot.id,
-          limit: request.args.limit,
-          ...(request.args.before_sequence === undefined
-            ? {}
-            : { beforeSeq: request.args.before_sequence }),
-        }),
-        client.getAsyncTasks({ id: bot.id }),
-        client.getSubagents({ id: bot.id }),
-      ]);
-      if (tail.entries.length > request.args.limit) {
-        return responseError(request, "INVALID_RESPONSE", false);
-      }
-      const result = createBridgeReadSnapshot({
-        bot_id: bot.id,
-        is_running: bot.is_running,
-        is_composing: agent.isComposingMessage ?? null,
-        awaiting_user:
-          agent.awaitingUserResponse === undefined
-            ? null
-            : agent.awaitingUserResponse !== null && agent.awaitingUserResponse !== false,
-        async_task_count: tasks.length,
-        running_subagent_count: subagents.filter(({ status }) => status === "running").length,
-        entries: tail.entries,
-        next_before_sequence: tail.nextBeforeSeq ?? null,
-      });
-      return bridgeResponseSchema.parse({
-        v: 2,
-        id: request.id,
-        op: request.op,
-        ok: true,
-        result,
-      });
-    }
-
-    let sendStarted = false;
-    try {
-      sendStarted = true;
-      const receipt = await client.sendPrompt({
-        agentId: bot.id,
-        prompt: request.args.message,
-        clientNonce: request.id,
-      });
-      if (receipt.accepted !== true) return responseError(request, "INVALID_RESPONSE", true);
-      return {
-        v: 1,
-        id: request.id,
-        op: request.op,
-        ok: true,
-        result: { accepted: true, request_id: request.id },
-      };
-    } catch (caught) {
-      return sdkFailure(request, caught, sendStarted);
-    }
+    return await (client.withGatewaySnapshot === undefined
+      ? handleBridgeRequestWithGateway(client, request)
+      : client.withGatewaySnapshot(() => handleBridgeRequestWithGateway(client, request)));
   } catch (caught) {
     return sdkFailure(request, caught, false);
+  }
+}
+
+async function handleBridgeRequestWithGateway(
+  client: BridgeClient,
+  request: BridgeRequest,
+): Promise<BridgeResponse> {
+  if (request.op === "status") {
+    const [health, agents] = await Promise.all([client.health(), client.listAgents()]);
+    return bridgeResponseSchema.parse({
+      v: BRIDGE_STATUS_PROTOCOL_VERSION,
+      id: request.id,
+      op: request.op,
+      ok: true,
+      result: {
+        companion_version: CODEX_GROK_VERSION,
+        supported_protocol_versions: [...BRIDGE_PROTOCOL_VERSIONS],
+        capabilities: [...BRIDGE_CAPABILITIES],
+        gateway_healthy: health.ok,
+        gateway_busy: health.isBusy,
+        non_group_bot_count: agents.filter((agent) => !agent.isGroup).length,
+      },
+    });
+  }
+
+  const agents = await client.listAgents();
+  const bots = agents
+    .filter((agent) => !agent.isGroup)
+    .map((agent) => ({ id: agent.id, name: agent.name, is_running: agent.isRunning ?? null }));
+
+  if (request.op === "list_bots") {
+    return bridgeResponseSchema.parse({
+      v: 1,
+      id: request.id,
+      op: request.op,
+      ok: true,
+      result: { bots },
+    });
+  }
+
+  const bot = bots.find((candidate) => candidate.id === request.args.bot_id);
+  if (bot === undefined) return responseError(request, "BOT_NOT_FOUND", false);
+
+  if (request.op === "read_bot") {
+    const agent = agents.find((candidate) => candidate.id === bot.id);
+    if (agent === undefined) return responseError(request, "BOT_NOT_FOUND", false);
+    const [tail, tasks, subagents] = await Promise.all([
+      client.getAgentTranscriptTail({
+        id: bot.id,
+        limit: request.args.limit,
+        ...(request.args.before_sequence === undefined
+          ? {}
+          : { beforeSeq: request.args.before_sequence }),
+      }),
+      client.getAsyncTasks({ id: bot.id }),
+      client.getSubagents({ id: bot.id }),
+    ]);
+    if (tail.entries.length > request.args.limit) {
+      return responseError(request, "INVALID_RESPONSE", false);
+    }
+    const result = createBridgeReadSnapshot({
+      bot_id: bot.id,
+      is_running: bot.is_running,
+      is_composing: agent.isComposingMessage ?? null,
+      awaiting_user:
+        agent.awaitingUserResponse === undefined
+          ? null
+          : agent.awaitingUserResponse !== null && agent.awaitingUserResponse !== false,
+      async_task_count: tasks.length,
+      running_subagent_count: subagents.filter(({ status }) => status === "running").length,
+      entries: tail.entries,
+      next_before_sequence: tail.nextBeforeSeq ?? null,
+    });
+    return bridgeResponseSchema.parse({
+      v: 2,
+      id: request.id,
+      op: request.op,
+      ok: true,
+      result,
+    });
+  }
+
+  let sendStarted = false;
+  try {
+    sendStarted = true;
+    const receipt = await client.sendPrompt({
+      agentId: bot.id,
+      prompt: request.args.message,
+      clientNonce: request.id,
+    });
+    if (receipt.accepted !== true) return responseError(request, "INVALID_RESPONSE", true);
+    return {
+      v: 1,
+      id: request.id,
+      op: request.op,
+      ok: true,
+      result: { accepted: true, request_id: request.id },
+    };
+  } catch (caught) {
+    return sdkFailure(request, caught, sendStarted);
   }
 }
 
@@ -517,24 +553,34 @@ export async function runBridgeCompanion(
       stdout.write(`${JSON.stringify(result)}\n`);
       return 0;
     }
-    if (command === "unpair") {
-      const removed = await removePairingConfig(dependencies.configPath);
-      stdout.write(`${JSON.stringify({ unpaired: removed })}\n`);
-      return 0;
-    }
+    const configPath = dependencies.configPath ?? defaultBridgeConfigPath();
+    const lease = await CompanionLease.acquire(configPath);
+    try {
+      if (command === "unpair") {
+        const removed = await removePairingConfig(configPath);
+        stdout.write(`${JSON.stringify({ unpaired: removed })}\n`);
+        return 0;
+      }
 
-    const config =
-      command === "connect"
-        ? parsePairCode(await (dependencies.readPairCode ?? readPairCode)())
-        : await loadPairingConfig(dependencies.configPath);
-    if (command === "connect") {
-      await savePairingConfig(config, dependencies.configPath, { overwrite: force });
-      stdout.write(`${JSON.stringify({ paired: true, mode: "foreground" })}\n`);
+      const config =
+        command === "connect"
+          ? parsePairCode(await (dependencies.readPairCode ?? readPairCode)())
+          : await loadPairingConfig(configPath);
+      if (command === "connect") {
+        await savePairingConfig(config, configPath, { overwrite: force });
+        stdout.write(`${JSON.stringify({ paired: true, mode: "foreground" })}\n`);
+      }
+      await (dependencies.runBridge ?? runUntilSignal)(config, createClient());
+      return 0;
+    } finally {
+      await lease.release();
     }
-    await (dependencies.runBridge ?? runUntilSignal)(config, createClient());
-    return 0;
-  } catch {
-    stderr.write(`${JSON.stringify({ error: `${command ?? "bridge"}_failed` })}\n`);
+  } catch (caught) {
+    const error =
+      caught instanceof BridgeRuntimeError
+        ? caught.code
+        : `${command ?? "bridge"}_failed`;
+    stderr.write(`${JSON.stringify({ error })}\n`);
     return 1;
   }
 }

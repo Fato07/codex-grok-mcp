@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
@@ -360,9 +361,21 @@ function resolveGateway(options: ClientOptions): ResolvedGateway {
   };
 }
 
+function sameGateway(left: ResolvedGateway, right: ResolvedGateway): boolean {
+  return (
+    left.baseUrl === right.baseUrl &&
+    left.connectHost === right.connectHost &&
+    left.startedAt === right.startedAt &&
+    left.port === right.port &&
+    left.pid === right.pid &&
+    left.token === right.token
+  );
+}
+
 export class LocalGrokBotClient {
   readonly #fetch: typeof fetch;
-  readonly #gateway: ResolvedGateway;
+  readonly #gatewaySnapshot = new AsyncLocalStorage<ResolvedGateway>();
+  readonly #gatewayOptions: ClientOptions;
   readonly #timeoutMs: number;
   readonly #verifyServer: (
     pid: number,
@@ -373,27 +386,24 @@ export class LocalGrokBotClient {
 
   constructor(options: ClientOptions = {}) {
     this.#fetch = options.fetch ?? fetch;
-    this.#gateway = resolveGateway(options);
+    this.#gatewayOptions = options;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#verifyServer = options.verifyServer ?? linuxPidOwnsListeningPort;
-    if (
-      !this.#verifyServer(
-        this.#gateway.pid,
-        this.#gateway.port,
-        this.#gateway.connectHost,
-        this.#gateway.startedAt,
-      )
-    ) {
-      throw new LocalGatewayError("CONFIG_INVALID", 0, "");
-    }
+    this.#resolveVerifiedGateway("");
   }
 
   discovery(): LocalGatewayDiscovery {
+    const gateway = this.#resolveVerifiedGateway("");
     return {
-      port: this.#gateway.port,
-      pid: this.#gateway.pid,
-      hasToken: this.#gateway.hasToken,
+      port: gateway.port,
+      pid: gateway.pid,
+      hasToken: gateway.hasToken,
     };
+  }
+
+  async withGatewaySnapshot<T>(operation: () => Promise<T>): Promise<T> {
+    const gateway = this.#resolveVerifiedGateway(randomUUID());
+    return await this.#gatewaySnapshot.run(gateway, operation);
   }
 
   async health(): Promise<LocalGatewayHealth> {
@@ -468,24 +478,15 @@ export class LocalGrokBotClient {
     schema: z.ZodType<T>,
   ): Promise<T> {
     const requestId = randomUUID();
-    if (
-      !this.#verifyServer(
-        this.#gateway.pid,
-        this.#gateway.port,
-        this.#gateway.connectHost,
-        this.#gateway.startedAt,
-      )
-    ) {
-      throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
-    }
-    if (authenticated && this.#gateway.token === undefined) {
+    const gateway = this.#gatewaySnapshot.getStore() ?? this.#resolveVerifiedGateway(requestId);
+    if (authenticated && gateway.token === undefined) {
       throw new LocalGatewayError("AUTH_FAILED", 401, requestId);
     }
     const headers = new Headers({
       "x-sand-request-id": requestId,
       "x-sand-slim-avatars": "1",
     });
-    if (authenticated) headers.set("authorization", `Bearer ${this.#gateway.token}`);
+    if (authenticated) headers.set("authorization", `Bearer ${gateway.token}`);
     let encodedBody: string | undefined;
     if (body !== undefined) {
       headers.set("content-type", "application/json");
@@ -496,23 +497,19 @@ export class LocalGrokBotClient {
     const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
     timer.unref();
     try {
-      const response = await this.#fetch(`${this.#gateway.baseUrl}${path}`, {
+      this.#assertGatewayCurrent(gateway, requestId);
+      const response = await this.#fetch(`${gateway.baseUrl}${path}`, {
         method,
         headers,
         ...(encodedBody === undefined ? {} : { body: encodedBody }),
         redirect: "error",
         signal: controller.signal,
       });
-      if (
-        !this.#verifyServer(
-          this.#gateway.pid,
-          this.#gateway.port,
-          this.#gateway.connectHost,
-          this.#gateway.startedAt,
-        )
-      ) {
+      try {
+        this.#assertGatewayCurrent(gateway, requestId);
+      } catch (caught) {
         await response.body?.cancel().catch(() => undefined);
-        throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
+        throw caught;
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
@@ -556,6 +553,7 @@ export class LocalGrokBotClient {
       if (!validated.success) {
         throw new LocalGatewayError("INVALID_RESPONSE", 0, requestId);
       }
+      this.#assertGatewayCurrent(gateway, requestId);
       return validated.data;
     } catch (caught) {
       if (caught instanceof LocalGatewayError) throw caught;
@@ -566,6 +564,40 @@ export class LocalGrokBotClient {
       );
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  #resolveGateway(requestId: string): ResolvedGateway {
+    try {
+      return resolveGateway(this.#gatewayOptions);
+    } catch {
+      throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
+    }
+  }
+
+  #resolveVerifiedGateway(requestId: string): ResolvedGateway {
+    const gateway = this.#resolveGateway(requestId);
+    this.#assertGatewayCurrent(gateway, requestId);
+    return gateway;
+  }
+
+  #assertGatewayCurrent(gateway: ResolvedGateway, requestId: string): void {
+    this.#verifyGateway(gateway, requestId);
+    if (!sameGateway(gateway, this.#resolveGateway(requestId))) {
+      throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
+    }
+  }
+
+  #verifyGateway(gateway: ResolvedGateway, requestId: string): void {
+    if (
+      !this.#verifyServer(
+        gateway.pid,
+        gateway.port,
+        gateway.connectHost,
+        gateway.startedAt,
+      )
+    ) {
+      throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
     }
   }
 }

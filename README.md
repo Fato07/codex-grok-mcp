@@ -19,13 +19,13 @@ Codex -> local MCP server -> isolated Grok CLI -> xAI
                                                     -> local gateway -> named Bots
 ```
 
-The default connector exposes one tool, `grok_ask`. It pins a Grok model, runs one turn without subagents, and always disables Grok web search.
+The default connector exposes `grok_ask` plus the read-only `grok_bridge_status`. The ask tool pins a Grok model, runs one turn without subagents, and always disables Grok web search. Status returns only local mode/version metadata until the bridge is paired.
 
 `grok_ask` talks to **Grok CLI**, not a persistent named **Grok Bot**. It cannot enter a Bot conversation, use Bot memory, read Bot transcripts, or control the Grok Bot desktop app.
 
-After pairing, the server additionally exposes `grok_list_bots`, `grok_read_bot`, `grok_send_bot_message`, and `grok_ping_all_bots`. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
+After pairing, the server additionally exposes `grok_list_bots`, `grok_read_bot`, `grok_send_bot_message`, and `grok_ping_all_bots`. `grok_bridge_status` then performs an authenticated metadata-only handshake that returns connector and companion versions, supported bridge capabilities, gateway health/busy state, and the non-group Bot count—never Bot identities, relay details, credentials, or content. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
 
-The VM companion implements only local discovery, health, roster listing, exact-ID bounded text/status reads, and exact-ID send. Its unofficial gateway contract was cross-checked against the MIT-licensed [`grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk), but the Node-22-only SDK is not a runtime dependency because the live Grok Bot VM currently provides Node.js 20. Group rooms are excluded from the Bot roster and fail closed on reads. A live metadata-only probe has verified local gateway discovery and full-roster access inside a Grok Bot VM; paired reads and sends remain source beta and may break when Grok Bot changes.
+The VM companion implements only local discovery, health, roster listing, exact-ID bounded text/status reads, and exact-ID send. Each bridge operation pins one verified local gateway descriptor and token, so an exact-ID roster check and its subsequent read or send cannot cross a gateway restart. Its unofficial gateway contract was cross-checked against the MIT-licensed [`grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk), but the Node-22-only SDK is not a runtime dependency because the live Grok Bot VM currently provides Node.js 20. Group rooms are excluded from the Bot roster and fail closed on reads. A live metadata-only probe has verified local gateway discovery and full-roster access inside a Grok Bot VM; paired reads and sends remain source beta and may break when Grok Bot changes.
 
 ## Five-minute local install
 
@@ -106,7 +106,7 @@ Do not run a mutable GitHub default branch inside the credential-bearing VM. Onc
 
 `probe` returns only gateway health, process metadata, Bot count, and a roster fingerprint. It never prints the gateway token, URL, Bot names, IDs, transcripts, or prompts.
 
-The source beta companion currently runs in the foreground. Keep that terminal running while using the Bot tools. Background survival across Grok VM idle periods and computer updates is not yet claimed. Pair again with `--force` to rotate the key; run `codex-grok-mcp unpair` and `codex-grok-bridge unpair` to revoke both local copies.
+The source beta companion currently runs in the foreground. Keep that terminal running while using the Bot tools. Background survival across Grok VM idle periods and computer updates is not yet claimed. The replay ledger survives restarts under `${XDG_STATE_HOME}/codex-grok-mcp/replay` when `XDG_STATE_HOME` is absolute, or `~/.local/state/codex-grok-mcp/replay` otherwise. One exclusive lease prevents two companion processes from running against the same pairing; stop the current companion before updating, forcing a new pairing, or unpairing. A clean stop removes its lease. After an unclean crash, startup fails closed with `companion_lease_stale`; verify that the recorded PID is no longer running before manually removing the exact `bridge.json.lock` beside the pairing file. Automatic stale-lock reclamation is intentionally disabled to avoid two starters racing into the same pairing. Unpairing removes the saved copy but deliberately leaves fresh replay markers in place. Close old Codex tasks too: an already-running process retains configuration loaded into memory. `pair --force` prepares a new channel for future processes but does not revoke an old relay channel; suspected credential exposure requires stopping both sides, rotating the relay master, and pairing again.
 
 ## Configuration
 
@@ -141,6 +141,8 @@ There is no native broadcast call. `PING`-to-all sends exactly `PING` once to ea
 
 The confirmed workflow is capped at 50 Bots so its sequential request budget fits the plugin timeout.
 
+Before troubleshooting or messaging, call `grok_bridge_status` with `{}`. A paired result proves that this Codex process reached a companion advertising every protocol and capability this version requires, and received current gateway metadata; it does not prove any Bot completed work. Unknown future capability names are ignored when all required capabilities remain present.
+
 A successful receipt has the completion boundary `gateway_accepted_not_bot_reply`: the gateway accepted that send, but this does not prove that the Bot replied, completed work, or persisted the message. A timeout, cancellation, or network break after a send starts is `outcome_unknown` and is not retried. Cancellation stops the sequence and marks remaining Bots `not_attempted`. Test one exact Bot before considering a confirmed all-Bot ping.
 
 ## Privacy and isolation boundary
@@ -162,8 +164,9 @@ The connector does not intentionally log prompt, response, or Bot transcript con
 | Windows / WSL | Unverified |
 | Codex cloud | Unsupported; the connector needs a local Grok executable and login |
 | Grok Bot VM gateway discovery and roster probe | Verified metadata-only on Node.js 20.19.2 |
-| Paired bounded Bot reads | Experimental; locally tested, not yet live-validated |
-| Paired end-to-end Bot messaging | Experimental; locally tested, not yet live-deployed |
+| Paired bounded Bot reads | Experimental; live operator smoke test passed on the current private beta |
+| Paired exact-ID Bot messaging | Experimental; gateway acceptance and later bounded transcript observation passed in a live operator smoke test |
+| Background companion lifecycle | Unsupported; foreground operation only |
 
 Passing unit tests is not compatibility proof. A platform becomes supported only after a live model-identity smoke test.
 
@@ -210,7 +213,7 @@ Run `codex-grok-mcp --doctor`, record the connector, Node, Codex, Grok CLI, OS, 
 
 Confirm `RELAY_ACCESS_TOKEN` is set on the relay, run `codex-grok-mcp pair` with the same value in `CODEX_GROK_RELAY_TOKEN`, keep `codex-grok-bridge connect` running in Grok Bot's Computer, and start a new Codex task. Never paste the pairing code or gateway token into a Bot/Codex prompt or issue.
 
-If only `grok_read_bot` returns `UPGRADE_REQUIRED`, update and restart the VM companion. Reads use bridge protocol v2; roster listing and sends remain compatible with v1.
+If `grok_bridge_status` or `grok_read_bot` returns `UPGRADE_REQUIRED`, update and restart the VM companion. Status uses bridge protocol v3, reads use v2, and roster listing plus sends remain compatible with v1.
 
 ## Uninstall
 

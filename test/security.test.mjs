@@ -374,7 +374,7 @@ test("the npm-style symlinked executable runs doctor", async () => {
   assert.match(stdout, /Model: grok-4\.6/);
 });
 
-test("MCP exposes only grok_ask, rejects extra input, and returns safe errors", async () => {
+test("MCP exposes only the isolated ask and safe bridge status tools", async () => {
   const f = await fixture();
   const server = createServer(f.env);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -406,13 +406,20 @@ test("MCP exposes only grok_ask, rejects extra input, and returns safe errors", 
     await clientTransport.send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
     const listed = await request("tools/list");
-    assert.equal(listed.tools.length, 1);
-    assert.equal(listed.tools[0].name, "grok_ask");
-    assert.equal(listed.tools[0].title, "Ask Grok");
-    assert.deepEqual(listed.tools[0].annotations, {
+    assert.deepEqual(listed.tools.map(({ name }) => name), ["grok_ask", "grok_bridge_status"]);
+    const ask = listed.tools.find(({ name }) => name === "grok_ask");
+    assert.equal(ask.title, "Ask Grok");
+    assert.deepEqual(ask.annotations, {
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
+      openWorldHint: true,
+    });
+    const status = listed.tools.find(({ name }) => name === "grok_bridge_status");
+    assert.deepEqual(status.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     });
 

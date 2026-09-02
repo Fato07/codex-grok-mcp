@@ -1,7 +1,7 @@
 import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 
 const MAX_MARKERS = 1_024;
 
@@ -16,9 +16,17 @@ function isNodeError(caught: unknown): caught is NodeJS.ErrnoException {
   return caught instanceof Error && "code" in caught;
 }
 
-function defaultReplayRoot(): string {
-  const uid = typeof process.getuid === "function" ? process.getuid() : process.pid;
-  return join(tmpdir(), `codex-grok-mcp-replay-${uid}`);
+export function defaultReplayRoot(
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string {
+  const xdgStateHome = environment.XDG_STATE_HOME;
+  const stateHome =
+    xdgStateHome !== undefined && isAbsolute(xdgStateHome)
+      ? xdgStateHome
+      : join(home, ".local", "state");
+  if (!isAbsolute(stateHome)) throw new BridgeReplayError();
+  return join(stateHome, "codex-grok-mcp", "replay");
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {

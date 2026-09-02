@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,9 +16,13 @@ import {
   encryptFrame,
   generatePairCode,
   parsePairCode,
+  savePairingConfig,
 } from "../dist/bridge-pairing.js";
 import { PersistentReplayGuard } from "../dist/bridge-replay.js";
-import { LocalGatewayError } from "../dist/grok-bot-client.js";
+import {
+  LocalGatewayError,
+  LocalGrokBotClient,
+} from "../dist/grok-bot-client.js";
 
 test("probe emits only allowlisted metadata and sanitizes failures", async () => {
   const botId = "00000000-0000-4000-8000-0000000000a1";
@@ -96,6 +100,61 @@ test("probe emits only allowlisted metadata and sanitizes failures", async () =>
   assert.equal(stderr, '{"error":"probe_failed"}\n');
   assert(!stderr.includes(failure));
   for (const secret of secretValues) assert(!stderr.includes(secret));
+});
+
+test("status handshake returns only allowlisted companion and gateway metadata", async () => {
+  const secrets = [
+    "bot-secret-id",
+    "Ada Secret",
+    "gateway-secret-token",
+    "https://private.example.test",
+    "/home/box/private.json",
+    "private transcript",
+    "private prompt",
+  ];
+  const result = await handleBridgeRequest(
+    {
+      discovery: () => ({
+        port: 1340,
+        pid: 2468,
+        hasToken: true,
+        token: secrets[2],
+        baseUrl: secrets[3],
+        path: secrets[4],
+      }),
+      health: async () => ({ ok: true, isBusy: true, activeAgentId: secrets[0] }),
+      listAgents: async () => [
+        {
+          id: secrets[0],
+          name: secrets[1],
+          isGroup: false,
+          transcript: secrets[5],
+          prompt: secrets[6],
+        },
+        { id: "group-secret-id", name: "Private group", isGroup: true },
+      ],
+    },
+    {
+      v: 3,
+      id: randomUUID(),
+      issued_at_ms: Date.now(),
+      op: "status",
+      args: {},
+    },
+  );
+
+  assert.deepEqual(result.result, {
+    companion_version: "0.2.0-beta.1",
+    supported_protocol_versions: [1, 2, 3],
+    capabilities: ["status", "list_bots", "read_bot", "send_message"],
+    gateway_healthy: true,
+    gateway_busy: true,
+    non_group_bot_count: 1,
+  });
+  const serialized = JSON.stringify(result);
+  for (const secret of secrets) assert(!serialized.includes(secret));
+  assert(!serialized.includes("group-secret-id"));
+  assert(!serialized.includes("Private group"));
 });
 
 test("companion replays the authenticated receipt without sending twice", async () => {
@@ -350,6 +409,70 @@ test("companion marks every post-send gateway status as delivery-uncertain", asy
   }
 });
 
+test("one bridge send cannot validate a Bot on gateway A and send through gateway B", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-operation-gateway-race-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  const gatewayA = {
+    port: 4401,
+    pid: 5401,
+    startedAt: 6401,
+    host: "127.0.0.1",
+    token: "token-a",
+  };
+  const gatewayB = {
+    port: 4402,
+    pid: 5402,
+    startedAt: 6402,
+    host: "127.0.0.1",
+    token: "token-b",
+  };
+  await writeFile(discoveryPath, JSON.stringify(gatewayA), { mode: 0o600 });
+
+  const requests = [];
+  const client = new LocalGrokBotClient({
+    discoveryPath,
+    env: {},
+    verifyServer: () => true,
+    fetch: async (input, init) => {
+      requests.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      if (String(input).endsWith("/api/listAgents")) {
+        return Response.json([
+          { id: "bot-a", name: "Gateway A Bot", isGroup: false, isRunning: true },
+        ]);
+      }
+      return Response.json({ accepted: true });
+    },
+  });
+  const listAgents = client.listAgents.bind(client);
+  client.listAgents = async () => {
+    const agents = await listAgents();
+    await writeFile(discoveryPath, JSON.stringify(gatewayB), { mode: 0o600 });
+    return agents;
+  };
+
+  const result = await handleBridgeRequest(client, {
+    v: 1,
+    id: randomUUID(),
+    issued_at_ms: Date.now(),
+    op: "send_message",
+    args: { bot_id: "bot-a", message: "send only on gateway A" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "CONFIG_INVALID");
+  assert.equal(result.error.delivery_may_have_occurred, true);
+  assert.deepEqual(requests, [
+    {
+      url: "http://127.0.0.1:4401/api/listAgents",
+      authorization: "Bearer token-a",
+    },
+  ]);
+});
+
 test("replay claims are atomic across independently opened companion guards", async () => {
   const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-replay-"));
   try {
@@ -442,6 +565,67 @@ test("companion pairs without echoing the code and validates exact Bot IDs befor
   assert.deepEqual(sends, [
     { agentId: bot.id, prompt: "hello", clientNonce: requestId },
   ]);
+});
+
+test("an active companion blocks forced reconnect and unpair without changing config", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-companion-"));
+  const configPath = join(root, "config", "bridge.json");
+  const config = parsePairCode(
+    generatePairCode("wss://relay.example.test/v1/connect"),
+  );
+  await savePairingConfig(config, configPath);
+
+  let stopRun;
+  let markStarted;
+  const started = new Promise((resolve) => (markStarted = resolve));
+  const running = runBridgeCompanion(["run"], {
+    configPath,
+    createClient: () => ({}),
+    runBridge: async () => {
+      markStarted();
+      await new Promise((resolve) => (stopRun = resolve));
+    },
+    stdout: { write: () => undefined },
+    stderr: { write: () => undefined },
+  });
+  context.after(async () => {
+    stopRun?.();
+    await running;
+    await rm(root, { recursive: true, force: true });
+  });
+  await started;
+  const before = await readFile(configPath, "utf8");
+
+  let pairCodeReads = 0;
+  let connectError = "";
+  const connected = await runBridgeCompanion(["connect", "--force"], {
+    configPath,
+    createClient: () => ({}),
+    readPairCode: async () => {
+      pairCodeReads += 1;
+      return generatePairCode("wss://other.example.test/v1/connect");
+    },
+    runBridge: async () => undefined,
+    stdout: { write: () => undefined },
+    stderr: { write: (chunk) => (connectError += chunk) },
+  });
+  assert.equal(connected, 1);
+  assert.equal(connectError, '{"error":"companion_already_running"}\n');
+  assert.equal(pairCodeReads, 0);
+  assert.equal(await readFile(configPath, "utf8"), before);
+
+  let unpairError = "";
+  const unpaired = await runBridgeCompanion(["unpair"], {
+    configPath,
+    stdout: { write: () => undefined },
+    stderr: { write: (chunk) => (unpairError += chunk) },
+  });
+  assert.equal(unpaired, 1);
+  assert.equal(unpairError, '{"error":"companion_already_running"}\n');
+  assert.equal(await readFile(configPath, "utf8"), before);
+
+  stopRun();
+  assert.equal(await running, 0);
 });
 
 test("companion returns a bounded sanitized read-only Bot snapshot", async () => {

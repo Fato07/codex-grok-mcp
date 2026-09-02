@@ -17,7 +17,11 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - Honest uncertain-write receipts: interrupted sends are `outcome_unknown`; cancellation leaves remaining Bots `not_attempted`.
 - Node-20-compatible loopback gateway client with bounded responses, protocol-v2 read support, explicit `UPGRADE_REQUIRED` for older companions, and no Node-22 SDK runtime dependency.
 - Persistent replay prevention, cached replay receipts, and a process-wide send guard that survives relay reconnects.
+- Persistent private replay state that survives companion restarts, plus an exclusive fail-closed companion lease that blocks concurrent `run`, forced reconnect, and unpair operations without racing to reclaim stale locks.
+- Per-operation gateway descriptor/token pinning, pre/post-response verification, fail-closed rotation detection, and no automatic retry.
+- Always-available `grok_bridge_status`, with safe unpaired/direct states and an authenticated paired protocol-v3 capability and health handshake.
 - Loopback gateway process verification and explicit relay observability disablement.
+- A live paired smoke test listed 20 Bots, obtained 20 unique exact-ID gateway acceptance receipts, and observed later bounded Bot transcript entries without connector errors or retries. This proves asynchronous outbound and inbound operation, not reply correlation or task completion.
 
 ### Known limitations
 
@@ -26,7 +30,7 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - No hosted relay is deployed by this source change; users must deploy the included relay or supply a compatible one.
 - Bot activity and sanitized transcript order do not prove task completion or send/reply correlation.
 - Gateway acceptance does not prove a Bot replied, completed work, or persisted a message.
-- No live paired-read or paired-message validation is claimed.
+- Live testing does not yet establish background-process survival, send/reply correlation, or production resilience.
 
 ## [0.1.0-alpha.1]
 

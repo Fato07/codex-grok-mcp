@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { MAX_PROMPT_BYTES } from "./schema.js";
+import { BRIDGE_STATUS_PROTOCOL_VERSION } from "./version.js";
 
 const MAX_ROSTER_BOTS = 500;
 export const MAX_READ_BOT_MESSAGES = 50;
@@ -67,6 +68,40 @@ export const bridgeReadSnapshotSchema = z
 
 export type BridgeReadMessage = z.infer<typeof bridgeReadMessageSchema>;
 export type BridgeReadSnapshot = z.infer<typeof bridgeReadSnapshotSchema>;
+
+const bridgeCapabilitySchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*$/);
+
+export const bridgeStatusResultSchema = z
+  .object({
+    companion_version: z.string().min(1).max(64).regex(/^[0-9A-Za-z.+-]+$/),
+    supported_protocol_versions: z
+      .array(z.number().int().positive().max(32))
+      .min(1)
+      .max(16)
+      .refine((versions) => new Set(versions).size === versions.length, "Versions must be unique")
+      .refine(
+        (versions) => versions.every((version, index) => index === 0 || version > versions[index - 1]!),
+        "Versions must be sorted",
+      ),
+    capabilities: z
+      .array(bridgeCapabilitySchema)
+      .min(1)
+      .max(16)
+      .refine(
+        (capabilities) => new Set(capabilities).size === capabilities.length,
+        "Capabilities must be unique",
+      ),
+    gateway_healthy: z.boolean(),
+    gateway_busy: z.boolean(),
+    non_group_bot_count: z.number().int().nonnegative().max(MAX_ROSTER_BOTS),
+  })
+  .strict();
+
+export type BridgeStatusResult = z.infer<typeof bridgeStatusResultSchema>;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -253,6 +288,15 @@ export function createBridgeReadSnapshot(input: {
 export const bridgeRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
+      v: z.literal(BRIDGE_STATUS_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      issued_at_ms: z.number().int().nonnegative(),
+      op: z.literal("status"),
+      args: z.object({}).strict(),
+    })
+    .strict(),
+  z
+    .object({
       v: z.literal(1),
       id: rpcIdSchema,
       issued_at_ms: z.number().int().nonnegative(),
@@ -317,6 +361,15 @@ const bridgeErrorSchema = z
 export const bridgeResponseSchema = z.union([
   z
     .object({
+      v: z.literal(BRIDGE_STATUS_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      op: z.literal("status"),
+      ok: z.literal(true),
+      result: bridgeStatusResultSchema,
+    })
+    .strict(),
+  z
+    .object({
       v: z.literal(1),
       id: rpcIdSchema,
       op: z.literal("list_bots"),
@@ -349,7 +402,7 @@ export const bridgeResponseSchema = z.union([
     .strict(),
   z
     .object({
-      v: z.union([z.literal(1), z.literal(2)]),
+      v: z.union([z.literal(1), z.literal(2), z.literal(BRIDGE_STATUS_PROTOCOL_VERSION)]),
       id: rpcIdSchema,
       ok: z.literal(false),
       error: bridgeErrorSchema,

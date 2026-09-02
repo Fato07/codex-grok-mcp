@@ -454,7 +454,25 @@ test("persistent Bot tools are opt-in and partial gateway credentials fail close
   const mcp = await openMcp({});
   try {
     const listed = await mcp.request("tools/list");
-    assert.deepEqual(listed.tools.map(({ name }) => name), ["grok_ask"]);
+    assert.deepEqual(listed.tools.map(({ name }) => name), ["grok_ask", "grok_bridge_status"]);
+    const tool = listed.tools.find(({ name }) => name === "grok_bridge_status");
+    assert.deepEqual(tool.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
+    const status = await mcp.request("tools/call", {
+      name: "grok_bridge_status",
+      arguments: {},
+    });
+    assert.deepEqual(status.structuredContent, {
+      experimental: true,
+      state: "not_paired",
+      mode: "unpaired",
+      server_version: "0.2.0-beta.1",
+    });
+    assert.match(status.content[0].text, /not paired/i);
   } finally {
     await mcp.close();
   }
@@ -476,6 +494,92 @@ test("persistent Bot tools are opt-in and partial gateway credentials fail close
     (error) =>
       error instanceof Error && /HTTPS|loopback/.test(error.message) && !error.message.includes(TOKEN),
   );
+});
+
+test("paired bridge status exposes only allowlisted metadata", async () => {
+  const secret = "must-not-leak-from-paired-transport";
+  const transport = {
+    secret,
+    async bridgeStatus() {
+      return {
+        companion_version: "0.2.0-beta.1",
+        supported_protocol_versions: [1, 2, 3],
+        capabilities: ["status", "list_bots", "read_bot", "send_message"],
+        gateway_healthy: true,
+        gateway_busy: false,
+        non_group_bot_count: 3,
+      };
+    },
+    async listBots() {
+      throw new Error("not used");
+    },
+    async readBot() {
+      throw new Error("not used");
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const mcp = await openMcp({}, { server: createServer({}, transport) });
+
+  try {
+    const status = await mcp.request("tools/call", {
+      name: "grok_bridge_status",
+      arguments: {},
+    });
+    assert.deepEqual(status.structuredContent, {
+      experimental: true,
+      state: "connected",
+      mode: "paired_relay",
+      server_version: "0.2.0-beta.1",
+      companion_version: "0.2.0-beta.1",
+      supported_protocol_versions: [1, 2, 3],
+      capabilities: ["status", "list_bots", "read_bot", "send_message"],
+      gateway_healthy: true,
+      gateway_busy: false,
+      non_group_bot_count: 3,
+    });
+    assert(!JSON.stringify(status).includes(secret));
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("paired bridge status rejects an incomplete capability handshake", async () => {
+  const transport = {
+    async bridgeStatus() {
+      return {
+        companion_version: "0.2.0-beta.1",
+        supported_protocol_versions: [1],
+        capabilities: ["list_bots", "future_capability"],
+        gateway_healthy: true,
+        gateway_busy: false,
+        non_group_bot_count: 1,
+      };
+    },
+    async listBots() {
+      throw new Error("not used");
+    },
+    async readBot() {
+      throw new Error("not used");
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const mcp = await openMcp({}, { server: createServer({}, transport) });
+
+  try {
+    const status = await mcp.request("tools/call", {
+      name: "grok_bridge_status",
+      arguments: {},
+    });
+    assert.equal(status.isError, true);
+    assert.match(status.content[0].text, /^\[UPGRADE_REQUIRED\]/);
+    assert.equal(status.structuredContent, undefined);
+  } finally {
+    await mcp.close();
+  }
 });
 
 test("configured gateway exposes roster and exact-ID send with an acceptance receipt", async () => {
@@ -504,12 +608,25 @@ test("configured gateway exposes roster and exact-ID send with an acceptance rec
       listed.tools.map(({ name }) => name),
       [
         "grok_ask",
+        "grok_bridge_status",
         "grok_list_bots",
         "grok_read_bot",
         "grok_send_bot_message",
         "grok_ping_all_bots",
       ],
     );
+
+    const bridgeStatus = await mcp.request("tools/call", {
+      name: "grok_bridge_status",
+      arguments: {},
+    });
+    assert.deepEqual(bridgeStatus.structuredContent, {
+      experimental: true,
+      state: "configured",
+      mode: "legacy_direct",
+      server_version: "0.2.0-beta.1",
+    });
+    assert.equal(gateway.requests.length, 0);
 
     const roster = await mcp.request("tools/call", {
       name: "grok_list_bots",

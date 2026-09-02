@@ -10,6 +10,10 @@ import {
   LocalGrokBotClient,
 } from "../dist/grok-bot-client.js";
 
+async function writeSecureDiscovery(path, descriptor) {
+  await writeFile(path, JSON.stringify(descriptor), { mode: 0o600 });
+}
+
 test("local gateway client discovers loopback and exposes only bounded calls", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-local-gateway-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -227,4 +231,130 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
     await chmod(linuxDiscoveryPath, 0o600);
     assert.equal(new LocalGrokBotClient({ discoveryPath: linuxDiscoveryPath, env: {} }).discovery().pid, process.pid);
   }
+});
+
+test("long-lived client refreshes the gateway descriptor and token before each request", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-gateway-refresh-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  const gateways = {
+    a: { port: 4101, pid: 5101, startedAt: 6101, host: "127.0.0.1", token: "token-a" },
+    b: { port: 4102, pid: 5102, startedAt: 6102, host: "127.0.0.1", token: "token-b" },
+  };
+  await writeSecureDiscovery(discoveryPath, gateways.a);
+
+  const requests = [];
+  const client = new LocalGrokBotClient({
+    discoveryPath,
+    env: {},
+    verifyServer: () => true,
+    fetch: async (input, init) => {
+      requests.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      return Response.json([
+        { id: `bot-${requests.length}`, name: `Gateway ${requests.length}`, isGroup: false },
+      ]);
+    },
+  });
+
+  assert.equal((await client.listAgents())[0].name, "Gateway 1");
+  await writeSecureDiscovery(discoveryPath, gateways.b);
+  assert.deepEqual(client.discovery(), { port: 4102, pid: 5102, hasToken: true });
+  assert.equal((await client.listAgents())[0].name, "Gateway 2");
+  assert.deepEqual(requests, [
+    { url: "http://127.0.0.1:4101/api/listAgents", authorization: "Bearer token-a" },
+    { url: "http://127.0.0.1:4102/api/listAgents", authorization: "Bearer token-b" },
+  ]);
+});
+
+test("descriptor rotation during a request fails closed without retrying", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-gateway-race-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  await writeSecureDiscovery(discoveryPath, {
+    port: 4201,
+    pid: 5201,
+    startedAt: 6201,
+    host: "127.0.0.1",
+    token: "token-a",
+  });
+
+  let requests = 0;
+  const client = new LocalGrokBotClient({
+    discoveryPath,
+    env: {},
+    verifyServer: () => true,
+    fetch: async () => {
+      requests += 1;
+      await writeSecureDiscovery(discoveryPath, {
+        port: 4202,
+        pid: 5202,
+        startedAt: 6202,
+        host: "127.0.0.1",
+        token: "token-b",
+      });
+      return Response.json([{ id: "bot-a", name: "Gateway A", isGroup: false }]);
+    },
+  });
+
+  await assert.rejects(client.listAgents(), { code: "CONFIG_INVALID" });
+  assert.equal(requests, 1);
+});
+
+test("descriptor rotation while reading a response body fails closed without retrying", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-gateway-body-race-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  const gatewayA = {
+    port: 4301,
+    pid: 5301,
+    startedAt: 6301,
+    host: "127.0.0.1",
+    token: "token-a",
+  };
+  const gatewayB = {
+    port: 4302,
+    pid: 5302,
+    startedAt: 6302,
+    host: "127.0.0.1",
+    token: "token-b",
+  };
+  await writeSecureDiscovery(discoveryPath, gatewayA);
+
+  let requests = 0;
+  let pulls = 0;
+  const client = new LocalGrokBotClient({
+    discoveryPath,
+    env: {},
+    verifyServer: () => true,
+    fetch: async () => {
+      requests += 1;
+      return new Response(
+        new ReadableStream(
+          {
+            async pull(controller) {
+              pulls += 1;
+              if (pulls === 1) {
+                controller.enqueue(new TextEncoder().encode('[{"id":"bot-a",'));
+                return;
+              }
+              await writeSecureDiscovery(discoveryPath, gatewayB);
+              controller.enqueue(
+                new TextEncoder().encode('"name":"Gateway A","isGroup":false}]'),
+              );
+              controller.close();
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  await assert.rejects(client.listAgents(), { code: "CONFIG_INVALID" });
+  assert.equal(requests, 1);
+  assert.equal(pulls, 2);
 });

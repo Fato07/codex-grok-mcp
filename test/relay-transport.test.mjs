@@ -11,6 +11,70 @@ import {
 import { GrokBotGatewayError } from "../dist/grok-bot-gateway.js";
 import { createRelayTransport } from "../dist/relay-transport.js";
 
+test("relay transport performs an authenticated metadata-only status handshake", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  let request;
+  let encryptedFrame;
+  server.on("connection", (socket, upgrade) => {
+    assert.equal(upgrade.headers.authorization, `Bearer ${config.relayToken}`);
+    socket.once("message", (data) => {
+      encryptedFrame = data.toString("utf8");
+      request = JSON.parse(decryptFrame(config, "codex", encryptedFrame).toString("utf8"));
+      socket.send(
+        encryptFrame(
+          config,
+          "bridge",
+          JSON.stringify({
+            v: 3,
+            id: request.id,
+            op: "status",
+            ok: true,
+            result: {
+              companion_version: "0.2.0-beta.1",
+              supported_protocol_versions: [1, 2, 3],
+              capabilities: ["status", "list_bots", "read_bot", "send_message"],
+              gateway_healthy: true,
+              gateway_busy: false,
+              non_group_bot_count: 2,
+            },
+          }),
+        ),
+      );
+    });
+  });
+
+  try {
+    const transport = createRelayTransport(config);
+    assert.deepEqual(await transport.bridgeStatus(), {
+      companion_version: "0.2.0-beta.1",
+      supported_protocol_versions: [1, 2, 3],
+      capabilities: ["status", "list_bots", "read_bot", "send_message"],
+      gateway_healthy: true,
+      gateway_busy: false,
+      non_group_bot_count: 2,
+    });
+    assert.deepEqual(request, {
+      v: 3,
+      id: request.id,
+      issued_at_ms: request.issued_at_ms,
+      op: "status",
+      args: {},
+    });
+    assert(!encryptedFrame.includes("status"));
+    assert(!encryptedFrame.includes(config.relayToken));
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+  }
+});
+
 test("relay transport treats a post-send 4404 close as uncertain without retry", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(server, "listening");
@@ -126,7 +190,7 @@ test("relay transport treats a post-send 4404 close as uncertain without retry",
   }
 });
 
-test("relay transport gives an actionable upgrade error for a legacy companion", async () => {
+test("relay status gives an actionable upgrade error for a legacy companion", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(server, "listening");
   const address = server.address();
@@ -141,7 +205,7 @@ test("relay transport gives an actionable upgrade error for a legacy companion",
   try {
     const transport = createRelayTransport(config);
     await assert.rejects(
-      transport.readBot("bot-1", { limit: 5 }),
+      transport.bridgeStatus(),
       (caught) => {
         assert(caught instanceof GrokBotGatewayError);
         assert.equal(caught.code, "UPGRADE_REQUIRED");
