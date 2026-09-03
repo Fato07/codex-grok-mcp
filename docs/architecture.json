@@ -10,7 +10,7 @@
     "quality_profile": "showcase",
     "repository": {
       "url": "https://github.com/Fato07/codex-grok-mcp",
-      "revision": "7d16c892d5137241df0b2d7c38413cdb54574a76"
+      "revision": "8b2fa705a91b0ae9c2a2b5ccd28c5a5ffacd5407"
     },
     "views": [
       {
@@ -35,7 +35,7 @@
     "legend": {
       "mode": "auto"
     },
-    "viewBox": [1580, 760]
+    "viewBox": [1680, 760]
   },
   "components": [
     {
@@ -97,14 +97,14 @@
       "id": "relay",
       "type": "cloud",
       "label": "Cloudflare relay",
-      "pos": [690, 526],
+      "pos": [880, 526],
       "size": [150, 64]
     },
     {
       "id": "companion",
       "type": "backend",
       "label": "VM companion",
-      "pos": [930, 526],
+      "pos": [1080, 526],
       "size": [150, 64]
     },
     {
@@ -113,18 +113,18 @@
       "label": "Grok Bot gateway",
       "sources": [
         {
-          "path": "src/grok-bot-gateway.ts",
-          "label": "Gateway boundary"
+          "path": "src/grok-bot-client.ts",
+          "label": "Loopback gateway client"
         }
       ],
-      "pos": [1160, 526],
+      "pos": [1270, 526],
       "size": [156, 64]
     },
     {
       "id": "bots",
       "type": "external",
       "label": "Named Grok Bots",
-      "pos": [1370, 526],
+      "pos": [1470, 526],
       "size": [156, 64]
     }
   ],
@@ -132,7 +132,7 @@
     {
       "kind": "region",
       "label": "Codex machine",
-      "wraps": ["codex", "mcp_server", "private_workspace", "grok_cli"],
+      "wraps": ["codex", "mcp_server", "private_workspace", "grok_cli", "paired_client"],
       "pad": 20
     },
     {
@@ -194,28 +194,28 @@
       "to": "relay",
       "label": "outbound WSS + AES-256-GCM",
       "variant": "security",
-      "labelAt": [649, 604]
+      "labelAt": [744, 604]
     },
     {
       "from": "relay",
       "to": "companion",
       "label": "opaque frames",
       "variant": "emphasis",
-      "labelAt": [885, 604]
+      "labelAt": [1055, 604]
     },
     {
       "from": "companion",
       "to": "gateway",
       "label": "bounded loopback API",
       "variant": "security",
-      "labelAt": [1120, 604]
+      "labelAt": [1250, 604]
     },
     {
       "from": "gateway",
       "to": "bots",
       "label": "exact non-group Bot ID",
       "variant": "emphasis",
-      "labelAt": [1343, 604]
+      "labelAt": [1448, 604]
     }
   ],
   "cards": [

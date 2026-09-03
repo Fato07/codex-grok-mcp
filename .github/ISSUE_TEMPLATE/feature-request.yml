@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a focused Codex Grok MCP capability or workflow
+title: "feature: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, pairing codes, tokens, private paths, private prompts or responses, private files, or Bot transcripts. Report suspected vulnerabilities through GitHub's private **Report a vulnerability** flow instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Explain who is blocked, what they are trying to do, and why the current behavior is insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Describe the shortest user workflow from setup to the expected result.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Isolated Grok CLI
+        - Local MCP or Codex plugin
+        - Persistent Grok Bot bridge
+        - Artifact transfer
+        - Grok model selection
+        - Cloudflare relay
+        - Packaging, documentation, or CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Security and compatibility impact
+      description: Cover credentials, external writes, data handling, protocol, model, and platform compatibility, or state that none are affected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Acceptance evidence
+      description: State the tests and safe, redacted live evidence that would prove the request complete.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, private content, and account-specific data.
+          required: true

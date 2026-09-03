@@ -33,8 +33,9 @@ You need:
 
 - macOS;
 - Node.js 20.19.2 or newer;
-- Codex CLI or desktop;
-- Grok CLI installed and signed in (`grok --version` and `grok models`).
+- Codex CLI or desktop.
+
+For one-off `grok_ask` calls, install and sign in to Grok CLI (`grok --version` and `grok models`). Persistent Bot collaboration instead uses Grok Bot and the companion setup below.
 
 Install the immutable marketplace release and plugin:
 
@@ -85,7 +86,13 @@ This creates a practical `send -> wait -> read -> continue` loop. The bridge doe
 
 The gateway token stays inside the Grok Bot VM. Codex and the companion connect outward to a self-hosted relay. Application frames are encrypted end to end; the relay forwards ciphertext and stores no messages.
 
-[Explore the full architecture](https://fato07.github.io/codex-grok-mcp/architecture.html).
+## Architecture
+
+[![Codex enters one local MCP server, then uses either an isolated Grok CLI call or an encrypted relay to named Grok Bots.](docs/assets/architecture-overview.png)](https://fato07.github.io/codex-grok-mcp/architecture.html)
+
+Both paths enter through the same local MCP server. Credentials stay at their endpoints, and uncertain writes are never retried automatically.
+
+[Explore the interactive architecture](https://fato07.github.io/codex-grok-mcp/architecture.html) · [View the architecture source](docs/architecture.json)
 
 ## Tools
 
@@ -165,7 +172,7 @@ This mutable command never edits pairing state or updates a running process. Pre
 3. Use `grok_send_bot_message` once for one exact target.
 4. For all-Bot `PING`, preview the roster and review the native confirmation before accepting it.
 
-Reads return sanitized text only. They do not prove that a message answered a particular send or that a task finished. A successful send receipt means only that the gateway accepted the request. Timeouts and interrupted sends remain `outcome_unknown`; do not retry them automatically.
+Reads return sanitized text only. Attachments and other non-text transcript entries are omitted. Reads do not prove that a message answered a particular send or that a task finished. A successful send receipt means only that the gateway accepted the request. Timeouts and interrupted sends remain `outcome_unknown`; do not retry them automatically.
 
 ## Configuration
 
