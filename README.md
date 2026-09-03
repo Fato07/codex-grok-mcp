@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://fato07.github.io/codex-grok-mcp/">Website</a> ·
   <a href="https://www.npmjs.com/package/codex-grok-mcp">npm</a> ·
-  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.3">v0.2.0-beta.3</a>
+  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.4">v0.2.0-beta.4</a>
 </p>
 
 An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok CLI for a bounded second opinion. Its experimental paired bridge can also read bounded status and sanitized recent text from, or message, an exact persistent Grok Bot without exporting Grok Bot's gateway credential.
@@ -15,7 +15,7 @@ An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok
 > [!IMPORTANT]
 > Each `grok_ask` call sends the supplied prompt to xAI/Grok and consumes allowance from the signed-in Grok account. Experimental Bot sends are separate external writes. Bot reads expose sensitive transcript text to Codex as untrusted external content. This project is not affiliated with or endorsed by OpenAI or xAI.
 
-The public beta is distributed as the exact npm package `codex-grok-mcp@0.2.0-beta.3` and an immutable GitHub prerelease.
+The public beta is distributed as the exact npm package `codex-grok-mcp@0.2.0-beta.4` and an immutable GitHub prerelease.
 
 ## What it is
 
@@ -45,7 +45,7 @@ Prerequisites:
 Install the repository marketplace at the immutable beta tag, then install the plugin:
 
 ```bash
-codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.3
+codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.4
 codex plugin add codex-grok-mcp@codex-grok
 ```
 
@@ -55,14 +55,14 @@ Start a new Codex task so it discovers the plugin, then try:
 Ask Grok to challenge this architecture and return the three strongest objections.
 ```
 
-The plugin uses `npx` to run only `codex-grok-mcp@0.2.0-beta.3`. It does not modify Grok authentication.
+The plugin uses `npx` to run only `codex-grok-mcp@0.2.0-beta.4`. It does not modify Grok authentication.
 
 ## Direct Codex MCP setup
 
 If you do not want the plugin wrapper:
 
 ```bash
-codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-mcp
+codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-mcp
 ```
 
 Start a new Codex task after adding the server, then ask Codex to use `grok_ask`.
@@ -72,7 +72,7 @@ Start a new Codex task after adding the server, then ask Codex to use `grok_ask`
 Run after the local package installation:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-mcp --doctor
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-mcp --doctor
 ```
 
 Doctor checks local prerequisites and configuration without sending a prompt to Grok. It must not print authentication material.
@@ -90,22 +90,22 @@ RELAY_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(
 printf 'RELAY_ACCESS_TOKEN=%s\n' "$RELAY_TOKEN" | npx wrangler deploy --secrets-file /dev/stdin
 
 cd ..
-CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
+CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
 unset RELAY_TOKEN
 ```
 
 The pairing command requires an interactive terminal and prints the credential only there. Keep it private. In **Grok Bot's Computer** terminal—not in a Bot chat—run the exact companion release and paste the code into the no-echo prompt:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-bridge connect
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-bridge connect
 ```
 
 To update an already paired companion, stop the foreground process with `Ctrl-C`, then run the exact package version with `run`; pairing again is unnecessary:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-bridge run
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-bridge run
 ```
 
 Operators who deliberately prefer automatic beta updates on each companion restart can use the npm beta channel:
@@ -174,7 +174,7 @@ The connector does not intentionally log prompt, response, or Bot transcript con
 
 | Environment | Status |
 |---|---|
-| macOS, current local Codex and Grok CLI | Verified target for `0.2.0-beta.3` isolated CLI path |
+| macOS, current local Codex and Grok CLI | Verified target for `0.2.0-beta.4` isolated CLI path |
 | Linux | Planned; unverified |
 | Windows / WSL | Unverified |
 | Codex cloud | Unsupported; the connector needs a local Grok executable and login |
@@ -192,7 +192,7 @@ Passing unit tests is not compatibility proof. A platform becomes supported only
 Run the pinned package doctor directly:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-mcp --doctor
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-mcp --doctor
 ```
 
 ### Grok CLI is missing or not signed in
@@ -228,6 +228,10 @@ Confirm `RELAY_ACCESS_TOKEN` is set on the relay, run the pinned `codex-grok-mcp
 
 If `grok_bridge_status` or `grok_read_bot` returns `UPGRADE_REQUIRED`, update and restart the VM companion. Status uses bridge protocol v3, reads use v2, and roster listing plus sends remain compatible with v1.
 
+### `probe` returns `DATA_ROOT_SYMLINK`
+
+Point `SAND_DATA_ROOT` at the real Grok Bot data directory rather than a symlink, then rerun the pinned `probe` command. The companion rejects symlinked descriptor parents to prevent gateway credential substitution; it reports only the safe reason and never the path.
+
 ## Uninstall
 
 If installed as a plugin, uninstall **Codex Grok MCP** in the Codex desktop app, then remove the local marketplace:
@@ -245,8 +249,8 @@ codex mcp remove grok
 Remove both pairing files before uninstalling:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-mcp unpair
-npx --yes --package=codex-grok-mcp@0.2.0-beta.3 -- codex-grok-bridge unpair
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-mcp unpair
+npx --yes --package=codex-grok-mcp@0.2.0-beta.4 -- codex-grok-bridge unpair
 ```
 
 Uninstalling does not change or delete Grok CLI authentication or account data.

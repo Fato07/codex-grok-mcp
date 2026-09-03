@@ -2,6 +2,12 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.4] - 2026-09-03
+
+### Fixed
+
+- Preserve the safe `DATA_ROOT_SYMLINK` reason when `codex-grok-bridge probe` rejects a symlinked Grok Bot data root, without exposing the path or weakening descriptor validation.
+
 ## [0.2.0-beta.3] - 2026-09-03
 
 ### Fixed
