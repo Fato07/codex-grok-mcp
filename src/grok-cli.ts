@@ -5,9 +5,7 @@ import { access, chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "nod
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { constants } from "node:fs";
-import { MAX_PROMPT_BYTES } from "./schema.js";
-
-const ALLOWED_MODELS = ["grok-4.6", "grok-4.5"] as const;
+import { GROK_MODELS, MAX_PROMPT_BYTES } from "./schema.js";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const MIN_TIMEOUT_MS = 5_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -19,7 +17,7 @@ const ISOLATED_CONFIG = `[cli]
 auto_update = false
 `;
 
-export type GrokModel = (typeof ALLOWED_MODELS)[number];
+export type GrokModel = (typeof GROK_MODELS)[number];
 export type GrokErrorCode =
   | "AUTH_REQUIRED"
   | "BUSY"
@@ -94,9 +92,9 @@ const error = (
 ): GrokCliError => new GrokCliError(code, message, allowanceMayHaveBeenConsumed);
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokCliConfig {
-  const model = env.GROK_MCP_MODEL ?? "grok-4.6";
-  if (!ALLOWED_MODELS.includes(model as GrokModel)) {
-    throw error("CONFIG_INVALID", "GROK_MCP_MODEL must be grok-4.6 or grok-4.5.");
+  const model = env.GROK_MCP_MODEL ?? GROK_MODELS[0];
+  if (!GROK_MODELS.includes(model as GrokModel)) {
+    throw error("CONFIG_INVALID", `GROK_MCP_MODEL must be ${GROK_MODELS.join(" or ")}.`);
   }
 
   const timeoutText = env.GROK_MCP_TIMEOUT_MS ?? String(DEFAULT_TIMEOUT_MS);
