@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -115,6 +115,43 @@ test("probe emits only allowlisted metadata and sanitizes failures", async () =>
   for (const secret of secretValues) assert(!stderr.includes(secret));
 });
 
+test("probe names a symlinked SAND_DATA_ROOT without leaking paths", async (context) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-symlink-root-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const realRoot = join(sandbox, "real-data");
+  const symlinkRoot = join(sandbox, "agent-data");
+  await mkdir(realRoot);
+  await writeFile(
+    join(realRoot, "gateway.json"),
+    JSON.stringify({
+      port: 1340,
+      pid: 2468,
+      startedAt: Date.now(),
+      host: "127.0.0.1",
+      token: "gateway-test-token",
+    }),
+    { mode: 0o600 },
+  );
+  await symlink(realRoot, symlinkRoot, "dir");
+
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await runBridgeCompanion(["probe"], {
+    createClient: () =>
+      new LocalGrokBotClient({
+        env: { SAND_DATA_ROOT: symlinkRoot },
+        verifyServer: () => true,
+      }),
+    stdout: { write: (chunk) => (stdout += chunk) },
+    stderr: { write: (chunk) => (stderr += chunk) },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(stdout, "");
+  assert.equal(stderr, '{"error":"CONFIG_INVALID","reason":"DATA_ROOT_SYMLINK"}\n');
+  assert(!stderr.includes(sandbox));
+});
+
 test("status handshake returns only allowlisted companion and gateway metadata", async () => {
   const secrets = [
     "bot-secret-id",
@@ -157,7 +194,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
   );
 
   assert.deepEqual(result.result, {
-    companion_version: "0.2.0-beta.3",
+    companion_version: "0.2.0-beta.4",
     supported_protocol_versions: [1, 2, 3],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,

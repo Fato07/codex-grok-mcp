@@ -127,13 +127,20 @@ export class LocalGatewayError extends Error {
   readonly code: LocalGatewayErrorCode;
   readonly status: number;
   readonly requestId: string;
+  readonly reason: "DATA_ROOT_SYMLINK" | undefined;
 
-  constructor(code: LocalGatewayErrorCode, status: number, requestId: string) {
+  constructor(
+    code: LocalGatewayErrorCode,
+    status: number,
+    requestId: string,
+    reason?: "DATA_ROOT_SYMLINK",
+  ) {
     super("Grok Bot gateway request failed.");
     this.name = "LocalGatewayError";
     this.code = code;
     this.status = status;
     this.requestId = requestId;
+    this.reason = reason;
   }
 }
 
@@ -174,14 +181,16 @@ function sandRoot(env: NodeJS.ProcessEnv): string {
 
 function readDiscovery(path: string): z.infer<typeof discoveryFileSchema> | undefined {
   try {
-    const details = lstatSync(path);
     const parent = lstatSync(dirname(path));
+    if (parent.isSymbolicLink()) {
+      throw new LocalGatewayError("CONFIG_INVALID", 0, "", "DATA_ROOT_SYMLINK");
+    }
+    const details = lstatSync(path);
     if (
       details.isSymbolicLink() ||
       !details.isFile() ||
       details.size > 64 * 1024 ||
       (details.mode & 0o077) !== 0 ||
-      parent.isSymbolicLink() ||
       !parent.isDirectory() ||
       (parent.mode & 0o022) !== 0 ||
       (typeof process.getuid === "function" &&
@@ -192,7 +201,8 @@ function readDiscovery(path: string): z.infer<typeof discoveryFileSchema> | unde
     const raw = readFileSync(path, "utf8");
     if (Buffer.byteLength(raw, "utf8") > 64 * 1024) return undefined;
     return discoveryFileSchema.parse(JSON.parse(raw));
-  } catch {
+  } catch (caught) {
+    if (caught instanceof LocalGatewayError) throw caught;
     return undefined;
   }
 }
@@ -574,8 +584,13 @@ export class LocalGrokBotClient {
   #resolveGateway(requestId: string): ResolvedGateway {
     try {
       return resolveGateway(this.#gatewayOptions);
-    } catch {
-      throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
+    } catch (caught) {
+      throw new LocalGatewayError(
+        "CONFIG_INVALID",
+        0,
+        requestId,
+        caught instanceof LocalGatewayError ? caught.reason : undefined,
+      );
     }
   }
 

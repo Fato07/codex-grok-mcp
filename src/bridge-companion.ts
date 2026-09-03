@@ -582,7 +582,13 @@ export async function runBridgeCompanion(
         : caught instanceof LocalGatewayError
           ? caught.code
           : `${command ?? "bridge"}_failed`;
-    stderr.write(`${JSON.stringify({ error })}\n`);
+    const reason =
+      caught instanceof LocalGatewayError && caught.reason === "DATA_ROOT_SYMLINK"
+        ? caught.reason
+        : undefined;
+    stderr.write(
+      `${JSON.stringify({ error, ...(reason === undefined ? {} : { reason }) })}\n`,
+    );
     return 1;
   }
 }
