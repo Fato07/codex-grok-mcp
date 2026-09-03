@@ -579,7 +579,9 @@ export async function runBridgeCompanion(
     const error =
       caught instanceof BridgeRuntimeError
         ? caught.code
-        : `${command ?? "bridge"}_failed`;
+        : caught instanceof LocalGatewayError
+          ? caught.code
+          : `${command ?? "bridge"}_failed`;
     stderr.write(`${JSON.stringify({ error })}\n`);
     return 1;
   }

@@ -100,6 +100,19 @@ test("probe emits only allowlisted metadata and sanitizes failures", async () =>
   assert.equal(stderr, '{"error":"probe_failed"}\n');
   assert(!stderr.includes(failure));
   for (const secret of secretValues) assert(!stderr.includes(secret));
+
+  stderr = "";
+  exitCode = await runBridgeCompanion(["probe"], {
+    createClient: () => {
+      throw new LocalGatewayError("CONFIG_INVALID", 0, secretValues[0]);
+    },
+    stdout: { write: (chunk) => (stdout += chunk) },
+    stderr: { write: (chunk) => (stderr += chunk) },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(stderr, '{"error":"CONFIG_INVALID"}\n');
+  for (const secret of secretValues) assert(!stderr.includes(secret));
 });
 
 test("status handshake returns only allowlisted companion and gateway metadata", async () => {
@@ -144,7 +157,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
   );
 
   assert.deepEqual(result.result, {
-    companion_version: "0.2.0-beta.1",
+    companion_version: "0.2.0-beta.2",
     supported_protocol_versions: [1, 2, 3],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,

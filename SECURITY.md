@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`0.2.0-beta.1` is the supported public beta. Security fixes target the current source revision and the next prerelease.
+`0.2.0-beta.2` is the supported public beta. Security fixes target the current source revision and the next prerelease.
 
 ## Trust boundary
 
