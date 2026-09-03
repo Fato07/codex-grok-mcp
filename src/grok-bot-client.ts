@@ -146,6 +146,13 @@ function isLoopback(hostname: string): boolean {
   return octets.every((octet) => octet <= 255) && octets[0] === 127;
 }
 
+function normalizeGatewayHost(hostname: string): string {
+  const host = hostname.toLowerCase();
+  return host === "localhost" || ["0.0.0.0", "::", "[::]"].includes(host)
+    ? "127.0.0.1"
+    : hostname;
+}
+
 function readPort(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === "") return undefined;
   const port = Number(value);
@@ -315,7 +322,7 @@ function parseLoopbackUrl(value: string): URL {
   }
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
-    !isLoopback(url.hostname) ||
+    !isLoopback(normalizeGatewayHost(url.hostname)) ||
     url.username !== "" ||
     url.password !== "" ||
     (url.pathname !== "" && url.pathname !== "/") ||
@@ -334,10 +341,7 @@ function resolveGateway(options: ClientOptions): ResolvedGateway {
   const url = override === undefined || override === "" ? undefined : parseLoopbackUrl(override);
   const hostValue =
     url?.hostname ?? env.SAND_GATEWAY_BIND_HOST?.trim() ?? file?.host?.trim() ?? "127.0.0.1";
-  const host =
-    hostValue.toLowerCase() === "localhost" || ["0.0.0.0", "::", "[::]"].includes(hostValue)
-      ? "127.0.0.1"
-      : hostValue;
+  const host = normalizeGatewayHost(hostValue);
   if (!isLoopback(host)) throw new LocalGatewayError("CONFIG_INVALID", 0, "");
   const scheme = url !== undefined ? url.protocol.slice(0, -1) : (file?.scheme ?? "http");
   const port =

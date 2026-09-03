@@ -157,7 +157,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
   );
 
   assert.deepEqual(result.result, {
-    companion_version: "0.2.0-beta.2",
+    companion_version: "0.2.0-beta.3",
     supported_protocol_versions: [1, 2, 3],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,

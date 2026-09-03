@@ -36,7 +36,7 @@ test("relay transport performs an authenticated metadata-only status handshake",
             op: "status",
             ok: true,
             result: {
-              companion_version: "0.2.0-beta.2",
+              companion_version: "0.2.0-beta.3",
               supported_protocol_versions: [1, 2, 3],
               capabilities: ["status", "list_bots", "read_bot", "send_message"],
               gateway_healthy: true,
@@ -52,7 +52,7 @@ test("relay transport performs an authenticated metadata-only status handshake",
   try {
     const transport = createRelayTransport(config);
     assert.deepEqual(await transport.bridgeStatus(), {
-      companion_version: "0.2.0-beta.2",
+      companion_version: "0.2.0-beta.3",
       supported_protocol_versions: [1, 2, 3],
       capabilities: ["status", "list_bots", "read_bot", "send_message"],
       gateway_healthy: true,

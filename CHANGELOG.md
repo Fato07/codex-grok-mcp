@@ -2,6 +2,16 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.3] - 2026-09-03
+
+### Fixed
+
+- Accept the managed Grok Bot gateway's wildcard URL advertisement while still connecting only through `127.0.0.1`; non-loopback gateway targets remain rejected.
+
+### Changed
+
+- Document an opt-in `@beta` companion command for automatic updates on restart while retaining immutable exact-version pins as the default.
+
 ## [0.2.0-beta.2] - 2026-09-03
 
 ### Fixed

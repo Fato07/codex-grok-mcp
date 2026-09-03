@@ -14,6 +14,38 @@ async function writeSecureDiscovery(path, descriptor) {
   await writeFile(path, JSON.stringify(descriptor), { mode: 0o600 });
 }
 
+test("wildcard gateway URL overrides connect through loopback", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-wildcard-gateway-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  await writeSecureDiscovery(discoveryPath, {
+    port: 4137,
+    pid: 5137,
+    startedAt: 6137,
+    host: "127.0.0.1",
+    token: "gateway-test-token",
+  });
+
+  let verifiedHost;
+  let requestedUrl;
+  const client = new LocalGrokBotClient({
+    discoveryPath,
+    env: { SAND_GATEWAY_URL: "http://0.0.0.0:4137" },
+    verifyServer: (_pid, _port, host) => {
+      verifiedHost = host;
+      return true;
+    },
+    fetch: async (input) => {
+      requestedUrl = String(input);
+      return Response.json({ ok: true, isBusy: false });
+    },
+  });
+
+  assert.deepEqual(await client.health(), { ok: true, isBusy: false });
+  assert.equal(verifiedHost, "127.0.0.1");
+  assert.equal(requestedUrl, "http://127.0.0.1:4137/health");
+});
+
 test("local gateway client discovers loopback and exposes only bounded calls", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-local-gateway-"));
   context.after(() => rm(root, { recursive: true, force: true }));
