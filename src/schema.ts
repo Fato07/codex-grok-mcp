@@ -15,6 +15,7 @@ export const grokAskInputSchema = z
         `Prompt must not exceed ${MAX_PROMPT_BYTES} UTF-8 bytes`,
       )
       .describe("Question or task for a single, isolated Grok response"),
+    model: z.enum(GROK_MODELS).optional().describe("Exact Grok model for this call"),
   })
   .strict();
 

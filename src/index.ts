@@ -103,9 +103,13 @@ export function createServer(
         openWorldHint: true,
       },
     },
-    async ({ prompt }, context) => {
+    async ({ prompt, model }, context) => {
       try {
-        const result = await runGrok(prompt, { env, signal: context.mcpReq.signal });
+        const result = await runGrok(prompt, {
+          env,
+          ...(model === undefined ? {} : { model }),
+          signal: context.mcpReq.signal,
+        });
         const output: GrokAskOutput = {
           text: result.text,
           model: result.model,

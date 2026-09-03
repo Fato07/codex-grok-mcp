@@ -80,6 +80,8 @@ Codex -> local MCP server -> isolated Grok CLI -> xAI
 
 `grok_ask` starts one constrained Grok CLI turn with a private temporary home. It cannot enter a persistent Bot conversation, use Bot memory, read files, run commands, use subagents, or search the web.
 
+Each call may select one supported model. Omit `model` to use `GROK_MCP_MODEL`; provider, base URL, endpoint, and persistent Bot model settings are not accepted.
+
 The persistent path is the collaborative mode. Codex can list named non-group Bots running inside Grok Bot, inspect one, send it a task once, wait for its activity state, and read its latest bounded messages. Codex can then continue its own work using that update while the Bot's ongoing conversation stays in Grok Bot.
 
 This creates a practical `send -> wait -> read -> continue` loop. The bridge does not claim that a message answers a specific send or that an idle Bot completed its task.
