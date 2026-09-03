@@ -42,6 +42,8 @@ npm pack --dry-run
 
 Do not add postinstall scripts or telemetry. Version changes belong in release work, not ordinary feature pull requests.
 
+For a stable release candidate, use the single maintainer checklist in [RELEASING.md](RELEASING.md).
+
 ## Compatibility claims
 
 Mocks are not platform proof. A new supported environment needs a redacted live result containing OS, architecture, Node, Codex, Grok CLI, selected model, and a successful response. Do not include response content.
