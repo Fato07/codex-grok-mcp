@@ -5,9 +5,7 @@ import { access, chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "nod
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { constants } from "node:fs";
-import { MAX_PROMPT_BYTES } from "./schema.js";
-
-const ALLOWED_MODELS = ["grok-4.6", "grok-4.5"] as const;
+import { GROK_MODELS, MAX_PROMPT_BYTES } from "./schema.js";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const MIN_TIMEOUT_MS = 5_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -19,7 +17,7 @@ const ISOLATED_CONFIG = `[cli]
 auto_update = false
 `;
 
-export type GrokModel = (typeof ALLOWED_MODELS)[number];
+export type GrokModel = (typeof GROK_MODELS)[number];
 export type GrokErrorCode =
   | "AUTH_REQUIRED"
   | "BUSY"
@@ -60,7 +58,7 @@ export type GrokRunResult = {
 export type DoctorResult = {
   version: string;
   model: GrokModel;
-  availableModels: string[];
+  availableModels: GrokModel[];
 };
 
 type Sandbox = {
@@ -93,10 +91,13 @@ const error = (
   allowanceMayHaveBeenConsumed = false,
 ): GrokCliError => new GrokCliError(code, message, allowanceMayHaveBeenConsumed);
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokCliConfig {
-  const model = env.GROK_MCP_MODEL ?? "grok-4.6";
-  if (!ALLOWED_MODELS.includes(model as GrokModel)) {
-    throw error("CONFIG_INVALID", "GROK_MCP_MODEL must be grok-4.6 or grok-4.5.");
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  modelOverride?: GrokModel,
+): GrokCliConfig {
+  const model = modelOverride ?? env.GROK_MCP_MODEL ?? GROK_MODELS[0];
+  if (!GROK_MODELS.includes(model as GrokModel)) {
+    throw error("CONFIG_INVALID", `Model must be ${GROK_MODELS.join(" or ")}.`);
   }
 
   const timeoutText = env.GROK_MCP_TIMEOUT_MS ?? String(DEFAULT_TIMEOUT_MS);
@@ -332,7 +333,7 @@ function askArgs(sandbox: Sandbox, model: GrokModel): string[] {
 
 export async function runGrok(
   prompt: string,
-  options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
+  options: { env?: NodeJS.ProcessEnv; model?: GrokModel; signal?: AbortSignal } = {},
 ): Promise<GrokRunResult> {
   if (active) throw error("BUSY", "Another Grok request is already running. Wait for it to finish.");
   if (
@@ -349,7 +350,7 @@ export async function runGrok(
   let sandbox: Sandbox | undefined;
   try {
     const sourceEnv = options.env ?? process.env;
-    const config = loadConfig(sourceEnv);
+    const config = loadConfig(sourceEnv, options.model);
     sandbox = await prepareSandbox(config.authPath, prompt);
     process.stderr.write(
       `${JSON.stringify({ event: "grok_request_started", request_id: requestId })}\n`,
@@ -409,11 +410,13 @@ export async function doctor(env: NodeJS.ProcessEnv = process.env): Promise<Doct
         env: filteredEnv(env, sandbox),
         timeoutMs: Math.min(config.timeoutMs, 30_000),
       });
-      const availableModels = models.stdout
-        .split("\n")
-        .map((line) => line.match(/^\s*[*-]\s+(\S+)/)?.[1])
-        .filter((model): model is string => model !== undefined)
-        .sort();
+      const listedModels = new Set(
+        models.stdout
+          .split("\n")
+          .map((line) => line.match(/^\s*[*-]\s+(\S+)/)?.[1])
+          .filter((model): model is string => model !== undefined),
+      );
+      const availableModels = GROK_MODELS.filter((model) => listedModels.has(model));
       if (!availableModels.includes(config.model)) {
         throw error("MODEL_UNAVAILABLE", `Configured model ${config.model} is not available.`);
       }

@@ -11,6 +11,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { doctor, GrokCliError, runGrok } from "../dist/grok-cli.js";
 import { createServer } from "../dist/index.js";
+import { GROK_MODELS } from "../dist/schema.js";
 
 const FAKE_GROK = String.raw`#!/usr/bin/env node
 import {
@@ -29,7 +30,7 @@ if (args.length === 1 && args[0] === "--version") {
   process.exit(0);
 }
 if (args.length === 1 && args[0] === "models") {
-  process.stdout.write("* grok-4.6\n- grok-4.5\n");
+  process.stdout.write("* grok-4.6\n- custom-provider/model\n");
   process.exit(0);
 }
 
@@ -244,6 +245,23 @@ test("prompt transport preserves edge cases and never reinterprets them as argum
   }
 });
 
+test("runner uses the configured default and accepts every allowed per-call model", async () => {
+  const f = await fixture({ GROK_MCP_MODEL: "grok-4.5" });
+
+  assert.equal((await runGrok("configured default", { env: f.env })).model, "grok-4.5");
+  for (const model of GROK_MODELS) {
+    const result = await runGrok(`selected ${model}`, { env: f.env, model });
+    assert.equal(result.model, model);
+  }
+
+  assert.deepEqual(
+    (await captures(f.capturePath)).map(({ args }) =>
+      args.find((argument) => argument.startsWith("--model=")),
+    ),
+    ["--model=grok-4.5", ...GROK_MODELS.map((model) => `--model=${model}`)],
+  );
+});
+
 test("runner strictly rejects malformed or empty Grok JSON", async (t) => {
   for (const prompt of ["__MALFORMED__", "__EMPTY_TEXT__", "__TRAILING_JSON__"]) {
     await t.test(prompt, async () => {
@@ -360,6 +378,14 @@ test("unsafe executable and model configuration fail before child launch", async
     await expectCode(runGrok("hello", { env: f.env }), "CONFIG_INVALID");
     await removed(f.capturePath);
   });
+  await t.test("disallowed per-call model", async () => {
+    const f = await fixture();
+    await expectCode(
+      runGrok("hello", { env: f.env, model: "attacker-model" }),
+      "CONFIG_INVALID",
+    );
+    await removed(f.capturePath);
+  });
 });
 
 test("doctor verifies the fake CLI without sending a prompt", async () => {
@@ -367,8 +393,8 @@ test("doctor verifies the fake CLI without sending a prompt", async () => {
   const result = await doctor(f.env);
   assert.deepEqual(result, {
     version: "grok 1.0.13",
-    model: "grok-4.6",
-    availableModels: ["grok-4.5", "grok-4.6"],
+    model: GROK_MODELS[0],
+    availableModels: [GROK_MODELS[0]],
   });
   await removed(f.capturePath);
   assert.equal(await readFile(f.authPath, "utf8"), '{"test":"credential-placeholder"}');
@@ -419,6 +445,8 @@ test("MCP exposes only the isolated ask and safe bridge status tools", async () 
     assert.deepEqual(listed.tools.map(({ name }) => name), ["grok_ask", "grok_bridge_status"]);
     const ask = listed.tools.find(({ name }) => name === "grok_ask");
     assert.equal(ask.title, "Ask Grok");
+    assert.deepEqual(ask.inputSchema.properties.model.enum, [...GROK_MODELS]);
+    assert(!ask.inputSchema.required.includes("model"));
     assert.deepEqual(ask.annotations, {
       readOnlyHint: false,
       destructiveHint: false,
@@ -452,12 +480,26 @@ test("MCP exposes only the isolated ask and safe bridge status tools", async () 
       },
     );
 
+    const selected = await request("tools/call", {
+      name: "grok_ask",
+      arguments: { prompt: "MCP selected model", model: "grok-4.5" },
+    });
+    assert.equal(selected.isError, undefined);
+    assert.equal(selected.structuredContent.model, "grok-4.5");
+
+    const invalidModel = await request("tools/call", {
+      name: "grok_ask",
+      arguments: { prompt: "must not launch", model: "attacker-model" },
+    });
+    assert.equal(invalidModel.isError, true);
+    assert.equal((await captures(f.capturePath)).length, 2);
+
     const invalid = await request("tools/call", {
       name: "grok_ask",
-      arguments: { prompt: "must not launch", extra: true },
+      arguments: { prompt: "must not launch", provider: "xai" },
     });
     assert.equal(invalid.isError, true);
-    assert.equal((await captures(f.capturePath)).length, 1);
+    assert.equal((await captures(f.capturePath)).length, 2);
 
     const failed = await request("tools/call", {
       name: "grok_ask",
@@ -468,7 +510,7 @@ test("MCP exposes only the isolated ask and safe bridge status tools", async () 
     assert.match(failed.content[0].text, /^\[INVALID_OUTPUT\] Grok CLI returned malformed JSON\./);
     assert.match(failed.content[0].text, /Automatic retry is disabled/);
     assert(!failed.content[0].text.includes("__MALFORMED__"));
-    assert.equal((await captures(f.capturePath)).length, 2);
+    assert.equal((await captures(f.capturePath)).length, 3);
   } finally {
     await clientTransport.close();
     await server.close();

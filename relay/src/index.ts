@@ -3,6 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 const CHANNEL_PATTERN = /^[A-Za-z0-9_-]{21}[AQgw]$/;
 const MAX_FRAME_BYTES = 128 * 1024;
 const INVALID_FRAME_CLOSE_CODE = 4400;
+const FRAME_AUTH_FAILED_CLOSE_CODE = 4401;
 const PEER_UNAVAILABLE_CLOSE_CODE = 4404;
 const TEXT_ENCODER = new TextEncoder();
 
@@ -127,11 +128,18 @@ export class Relay extends DurableObject<RelayEnv> {
       .find((candidate) => candidate.readyState === WebSocket.OPEN);
     if (!peer) return;
 
-    const rejectedFrame = code === INVALID_FRAME_CLOSE_CODE;
+    const propagatedCode =
+      code === INVALID_FRAME_CLOSE_CODE || code === FRAME_AUTH_FAILED_CLOSE_CODE
+        ? code
+        : PEER_UNAVAILABLE_CLOSE_CODE;
     close(
       peer,
-      rejectedFrame ? INVALID_FRAME_CLOSE_CODE : PEER_UNAVAILABLE_CLOSE_CODE,
-      rejectedFrame ? "peer rejected frame" : "peer unavailable",
+      propagatedCode,
+      propagatedCode === FRAME_AUTH_FAILED_CLOSE_CODE
+        ? "peer authentication failed"
+        : propagatedCode === INVALID_FRAME_CLOSE_CODE
+          ? "peer rejected frame"
+          : "peer unavailable",
     );
   }
 
