@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       name="description"
-      content="An open-source, local-first MCP bridge that lets Codex ask Grok for a bounded second opinion and experimentally collaborate with persistent Grok Bots."
+      content="An open-source MCP bridge that lets Codex ask Grok once or collaborate with persistent Grok Bots already running inside Grok Bot."
     >
     <meta name="theme-color" content="#090a0d">
     <meta property="og:type" content="website">
-    <meta property="og:title" content="Codex Grok MCP — Let Codex ask Grok">
+    <meta property="og:title" content="Codex Grok MCP | Codex talks to Grok Bots">
     <meta
       property="og:description"
-      content="A local-first bridge from Codex to Grok CLI and persistent Grok Bots. Open source, explicit, and security-minded."
+      content="Let Codex send work to named Grok Bots, wait, read bounded updates, and continue from them. One-off Grok CLI calls are supported too."
     >
     <meta property="og:url" content="https://fato07.github.io/codex-grok-mcp/">
     <meta property="og:image" content="https://fato07.github.io/codex-grok-mcp/assets/icon.png">
@@ -22,7 +22,7 @@
     <link rel="canonical" href="https://fato07.github.io/codex-grok-mcp/">
     <link rel="icon" href="./assets/icon.png">
     <link rel="stylesheet" href="./styles.css">
-    <title>Codex Grok MCP — Let Codex ask Grok</title>
+    <title>Codex Grok MCP | Codex talks to Grok Bots</title>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -30,7 +30,7 @@
         "name": "Codex Grok MCP",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS",
-        "softwareVersion": "0.2.0-beta.4",
+        "softwareVersion": "0.2.0-beta.5",
         "isAccessibleForFree": true,
         "license": "https://github.com/Fato07/codex-grok-mcp/blob/main/LICENSE",
         "downloadUrl": "https://www.npmjs.com/package/codex-grok-mcp"
@@ -62,10 +62,10 @@
       <section class="hero shell" id="top">
         <div class="hero-copy">
           <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Open-source public beta</p>
-          <h1>Get a Grok second opinion. <span>Without leaving Codex.</span></h1>
+          <h1>Ask Grok once. <span>Collaborate with your Grok Bots.</span></h1>
           <p class="hero-lede">
-            An unofficial, local-first MCP plugin for developers using Codex with a signed-in Grok CLI.
-            Ask one isolated question—or opt into an encrypted bridge to exact persistent Grok Bots.
+            Connect Codex to named Bots already running inside Grok Bot. Codex can send a task, wait,
+            read bounded updates, and continue the work. One isolated Grok CLI call is available too.
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="#install">Install the beta <span aria-hidden="true">↓</span></a>
@@ -77,72 +77,58 @@
             <li>MIT licensed</li>
             <li>macOS verified</li>
             <li>Node.js 20.19.2+</li>
-            <li>73 core + 2 relay tests</li>
+            <li>75 core + 2 relay tests</li>
           </ul>
           <p class="hero-disclosure">
-            <code>grok_ask</code> sends your prompt to xAI and consumes allowance from your signed-in Grok account.
+            <code>grok_ask</code> uses xAI allowance. Persistent Bot collaboration is experimental, and sends are never retried automatically.
           </p>
         </div>
 
-        <aside class="hero-proof" aria-label="Example connector route">
+        <aside class="hero-proof" aria-label="Persistent Bot collaboration example">
           <div class="terminal-bar">
             <span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span>one bounded request</span>
-            <span class="version">v0.2.0-beta.4</span>
+            <span>persistent Bot collaboration</span>
+            <span class="version">v0.2.0-beta.5</span>
           </div>
           <div class="request-card">
             <div class="route-label">CODEX</div>
-            <p>“Ask Grok to challenge this architecture and return the three strongest objections.”</p>
+            <p>“Ask my research Bot to review this plan, wait, then summarize its latest update.”</p>
           </div>
           <div class="route-line" aria-hidden="true">
-            <span></span><strong>grok_ask</strong><span></span>
+            <span></span><strong>send → wait → read</strong><span></span>
           </div>
           <div class="runtime-grid">
             <div>
-              <span class="runtime-key">MODEL</span>
-              <strong>grok-4.6</strong>
+              <span class="runtime-key">TARGET</span>
+              <strong>exact Bot ID</strong>
             </div>
             <div>
-              <span class="runtime-key">WEB SEARCH</span>
-              <strong>off</strong>
+              <span class="runtime-key">CHANNEL</span>
+              <strong>encrypted</strong>
             </div>
             <div>
-              <span class="runtime-key">SUBAGENTS</span>
-              <strong>off</strong>
+              <span class="runtime-key">READS</span>
+              <strong>bounded</strong>
             </div>
             <div>
-              <span class="runtime-key">RETRIES</span>
+              <span class="runtime-key">SEND RETRIES</span>
               <strong>none</strong>
             </div>
           </div>
           <div class="terminal-note">
             <span class="status-dot" aria-hidden="true"></span>
-            Prompt goes to xAI · consumes Grok allowance · temporary home removed after the call
+            Gateway acceptance is not a reply · activity is not proof of completion
           </div>
         </aside>
-      </section>
-
-      <section class="section shell problem" aria-labelledby="problem-title">
-        <div class="section-kicker">THE OLD WAY</div>
-        <div class="problem-grid">
-          <div>
-            <h2 id="problem-title">Your second model shouldn’t mean a second workflow.</h2>
-          </div>
-          <div class="problem-list">
-            <p><span>01</span> Copy context between apps and lose the thread.</p>
-            <p><span>02</span> Hand credentials or private state to brittle glue code.</p>
-            <p><span>03</span> Mistake “message accepted” for “the Bot finished.”</p>
-          </div>
-        </div>
       </section>
 
       <section class="section shell" id="capabilities" aria-labelledby="capabilities-title">
         <div class="section-heading">
           <div>
-            <p class="section-kicker">TWO DELIBERATE PATHS</p>
-            <h2 id="capabilities-title">Use Grok for the job you actually have.</h2>
+            <p class="section-kicker">TWO WAYS TO USE IT</p>
+            <h2 id="capabilities-title">One-off answers or persistent Bot collaboration.</h2>
           </div>
-          <p>Start with a clean second opinion. Opt into persistent Bot access only when the workflow needs it.</p>
+          <p>Ask Grok once for a clean second opinion. Connect persistent Bots when you need continuity and delegation.</p>
         </div>
 
         <div class="capability-grid">
@@ -172,20 +158,21 @@
               <span class="card-number">02</span>
               <span class="availability experimental">Experimental</span>
             </div>
-            <h3>Reach persistent Grok Bots</h3>
+            <h3>Collaborate with Grok Bots</h3>
             <p>
-              Pair an outbound-only VM companion, then list, read, wait for, or message one exact non-group Bot
-              through end-to-end encrypted relay frames.
+              Connect Codex to named Bots already running inside Grok Bot. List them, inspect status, send a task
+              to one exact Bot, wait, and read its latest bounded messages.
             </p>
             <div class="tool-row">
               <code>grok_list_bots</code>
               <code>grok_read_bot</code>
+              <code>grok_wait_for_bot</code>
               <code>grok_send_bot_message</code>
             </div>
             <ul class="check-list">
+              <li>Persistent Bot conversations</li>
               <li>Exact Bot targeting</li>
-              <li>Bounded sanitized reads</li>
-              <li>No automatic send retry</li>
+              <li>Foreground companion today</li>
             </ul>
           </article>
         </div>
@@ -198,7 +185,7 @@
               <p class="section-kicker">THE ROUTE, NOT THE MAGIC</p>
               <h2 id="architecture-title">Every boundary stays visible.</h2>
             </div>
-            <p>The connector keeps the local CLI path separate from the paired persistent-Bot path.</p>
+            <p>The one-off CLI path stays separate from the persistent Bot collaboration path.</p>
           </div>
 
           <figure class="architecture" aria-labelledby="architecture-title architecture-caption">
@@ -227,7 +214,7 @@
                 </div>
               </div>
               <div class="arch-branch">
-                <div class="branch-label"><span>OPT-IN</span> persistent Bots</div>
+                <div class="branch-label"><span>OPT-IN</span> persistent collaboration</div>
                 <div class="horizontal-arrow" aria-hidden="true">→</div>
                 <div class="arch-node relay-node">
                   <small>03B</small>
@@ -238,15 +225,18 @@
                 <div class="arch-node">
                   <small>04</small>
                   <strong>VM companion</strong>
-                  <em>local gateway → exact Bot</em>
+                  <em>local gateway → named Bot</em>
                 </div>
               </div>
             </div>
             <figcaption id="architecture-caption">
-              The relay can see connection metadata, a random channel, and client roles—not Bot names, IDs,
+              The relay can see connection metadata, a random channel, and client roles, but not Bot names, IDs,
               messages, or the Grok gateway token.
             </figcaption>
           </figure>
+          <a class="inline-cta" href="./architecture.html">
+            Explore the interactive architecture <span aria-hidden="true">↗</span>
+          </a>
         </div>
       </section>
 
@@ -262,18 +252,13 @@
         <div class="security-grid">
           <article>
             <span class="security-mark">⌁</span>
-            <h3>Local-first authentication</h3>
-            <p>Uses an existing signed-in Grok CLI. The connector checks the auth file but does not read it.</p>
+            <h3>Credentials stay put</h3>
+            <p>One-off calls use your signed-in Grok CLI. Paired gateway credentials stay inside the Grok Bot VM.</p>
           </article>
           <article>
             <span class="security-mark">◇</span>
-            <h3>End-to-end relay encryption</h3>
-            <p>AES-256-GCM protects paired application frames. Gateway credentials never leave the VM.</p>
-          </article>
-          <article>
-            <span class="security-mark">◎</span>
-            <h3>Exact-target sends</h3>
-            <p>Roster fingerprints and exact Bot IDs make recipient changes visible before a send.</p>
+            <h3>Encrypted, exact-target access</h3>
+            <p>AES-256-GCM protects paired frames. Exact Bot IDs and roster fingerprints make target changes visible.</p>
           </article>
           <article>
             <span class="security-mark">↯</span>
@@ -290,11 +275,11 @@
         <div class="shell install-shell">
           <div class="install-intro">
             <p class="section-kicker">THREE STEPS TO FIRST USE</p>
-            <h2 id="install-title">Install once. Start a fresh task. Ask.</h2>
+            <h2 id="install-title">Install once. Start a fresh task.</h2>
             <p>
               Requires macOS, Node.js 20.19.2+, Codex, and an installed, signed-in Grok CLI.
             </p>
-            <a class="text-link light-link" href="https://github.com/Fato07/codex-grok-mcp#five-minute-local-install">
+            <a class="text-link light-link" href="https://github.com/Fato07/codex-grok-mcp#quick-start">
               Read the full setup guide <span aria-hidden="true">↗</span>
             </a>
           </div>
@@ -305,7 +290,7 @@
                 <span>01 · Add the immutable marketplace release</span>
                 <button class="copy-button" type="button" data-copy-target="install-marketplace">Copy</button>
               </div>
-              <pre><code id="install-marketplace">codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.4</code></pre>
+              <pre><code id="install-marketplace">codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.5</code></pre>
             </li>
             <li>
               <div class="step-header">
@@ -322,38 +307,6 @@
         </div>
       </section>
 
-      <section class="section shell beta-section" aria-labelledby="beta-title">
-        <div>
-          <p class="section-kicker">HONEST BETA STATUS</p>
-          <h2 id="beta-title">Know where the bridge is solid—and where it is still experimental.</h2>
-        </div>
-        <dl class="status-list">
-          <div>
-            <dt><span class="status-dot"></span> Isolated Grok CLI path</dt>
-            <dd>Public beta · verified on macOS</dd>
-          </div>
-          <div>
-            <dt><span class="status-dot amber"></span> Persistent Grok Bot path</dt>
-            <dd>Experimental · exact-target reads and sends</dd>
-          </div>
-          <div>
-            <dt><span class="status-dot muted-dot"></span> Background companion lifecycle</dt>
-            <dd>Not claimed · foreground process today</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section class="final-cta shell" aria-labelledby="cta-title">
-        <img src="./assets/icon.png" alt="" width="144" height="144">
-        <div>
-          <p class="section-kicker">ONE WORKFLOW. TWO POINTS OF VIEW.</p>
-          <h2 id="cta-title">Give Codex a Grok second opinion.</h2>
-        </div>
-        <div class="final-actions">
-          <a class="button button-primary" href="#install">Install beta.4</a>
-          <a class="button button-ghost" href="https://github.com/Fato07/codex-grok-mcp">Star on GitHub <span aria-hidden="true">↗</span></a>
-        </div>
-      </section>
     </main>
 
     <footer class="site-footer">

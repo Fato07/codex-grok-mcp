@@ -352,7 +352,7 @@ export async function runGrok(
     const config = loadConfig(sourceEnv);
     sandbox = await prepareSandbox(config.authPath, prompt);
     process.stderr.write(
-      `${JSON.stringify({ event: "grok_request_started", request_id: requestId, model: config.model })}\n`,
+      `${JSON.stringify({ event: "grok_request_started", request_id: requestId })}\n`,
     );
     const result = await runProcess({
       args: askArgs(sandbox, config.model),

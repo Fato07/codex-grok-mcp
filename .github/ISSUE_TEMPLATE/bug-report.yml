@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible Codex Grok MCP problem
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, pairing codes, tokens, private paths, prompts, responses, or Bot transcripts. Report suspected vulnerabilities through GitHub's private **Report a vulnerability** flow instead.
+
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Setup
+      options:
+        - Codex plugin
+        - Direct MCP configuration
+        - Persistent Grok Bot bridge
+        - Relay deployment
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the problem.
+      placeholder: |
+        1. Run ...
+        2. Start a new Codex task
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include connector, OS, architecture, Node, Codex, and Grok CLI versions.
+      placeholder: codex-grok-mcp 0.2.0-beta.5; macOS arm64; Node 22; Codex ...; Grok CLI ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Paste only safe doctor, probe, or error-code output after removing private data.
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, pairing material, private content, and private paths.
+          required: true

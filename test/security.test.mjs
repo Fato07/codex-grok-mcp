@@ -276,6 +276,16 @@ test("child diagnostics and prompts are redacted from errors and logs", async ()
   assert(!exposed.includes("TOP_SECRET"));
   assert(!exposed.includes("__FAIL_SECRET__"));
   assert(!exposed.includes(f.root));
+  assert.deepEqual(
+    logs
+      .trim()
+      .split("\n")
+      .map((line) => Object.keys(JSON.parse(line)).sort()),
+    [
+      ["event", "request_id"],
+      ["code", "event", "request_id"],
+    ],
+  );
 });
 
 test("runner caps child output", async () => {

@@ -2,6 +2,22 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.5] - 2026-09-03
+
+### Added
+
+- An interactive architecture explorer and a structured bug report template.
+
+### Changed
+
+- Focus the README and website on collaboration with named Bots already running in Grok Bot.
+- Type-check the relay in CI and release verification, and omit the duplicate plugin icon from the npm package.
+
+### Fixed
+
+- Reject control and bidirectional formatting characters in Bot IDs and names before they can appear in recipient previews.
+- Keep request-start logs to the documented event and request identifier allowlist.
+
 ## [0.2.0-beta.4] - 2026-09-03
 
 ### Fixed

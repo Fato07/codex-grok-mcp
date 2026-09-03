@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "codex-grok-mcp Architecture",
+    "locale": "en",
+    "output": "docs/architecture.html",
+    "animation": "none",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/Fato07/codex-grok-mcp",
+      "revision": "7d16c892d5137241df0b2d7c38413cdb54574a76"
+    },
+    "views": [
+      {
+        "id": "one_off_ask",
+        "label": "One-off ask",
+        "focus": ["codex", "mcp_server", "private_workspace", "grok_cli", "xai"],
+        "note": "A temporary prompt file reaches the authenticated Grok CLI without entering the process list."
+      },
+      {
+        "id": "persistent_bots",
+        "label": "Persistent Bots",
+        "focus": ["codex", "mcp_server", "paired_client", "relay", "companion", "gateway", "bots"],
+        "note": "An encrypted outbound relay connects Codex to exact, non-group Bot identities in the Grok Bot VM."
+      },
+      {
+        "id": "trust_boundaries",
+        "label": "Trust boundaries",
+        "focus": ["private_workspace", "paired_client", "relay", "companion", "gateway"],
+        "note": "Secrets stay at their endpoints, and uncertain write outcomes are not retried automatically."
+      }
+    ],
+    "legend": {
+      "mode": "auto"
+    },
+    "viewBox": [1580, 760]
+  },
+  "components": [
+    {
+      "id": "codex",
+      "type": "frontend",
+      "label": "Codex",
+      "pos": [34, 326],
+      "size": [132, 64]
+    },
+    {
+      "id": "mcp_server",
+      "type": "backend",
+      "label": "Local MCP server",
+      "tag": "npm package",
+      "pos": [218, 326],
+      "size": [150, 64]
+    },
+    {
+      "id": "private_workspace",
+      "type": "security",
+      "label": "Private workspace",
+      "sources": [
+        {
+          "path": "src/grok-cli.ts",
+          "label": "Prompt boundary"
+        }
+      ],
+      "pos": [450, 132],
+      "size": [158, 64]
+    },
+    {
+      "id": "grok_cli",
+      "type": "backend",
+      "label": "Grok CLI",
+      "sources": [
+        {
+          "path": "src/grok-cli.ts",
+          "label": "CLI adapter"
+        }
+      ],
+      "pos": [690, 132],
+      "size": [150, 64]
+    },
+    {
+      "id": "xai",
+      "type": "external",
+      "label": "xAI Grok",
+      "pos": [930, 132],
+      "size": [148, 64]
+    },
+    {
+      "id": "paired_client",
+      "type": "security",
+      "label": "Paired client",
+      "pos": [450, 526],
+      "size": [158, 64]
+    },
+    {
+      "id": "relay",
+      "type": "cloud",
+      "label": "Cloudflare relay",
+      "pos": [690, 526],
+      "size": [150, 64]
+    },
+    {
+      "id": "companion",
+      "type": "backend",
+      "label": "VM companion",
+      "pos": [930, 526],
+      "size": [150, 64]
+    },
+    {
+      "id": "gateway",
+      "type": "security",
+      "label": "Grok Bot gateway",
+      "sources": [
+        {
+          "path": "src/grok-bot-gateway.ts",
+          "label": "Gateway boundary"
+        }
+      ],
+      "pos": [1160, 526],
+      "size": [156, 64]
+    },
+    {
+      "id": "bots",
+      "type": "external",
+      "label": "Named Grok Bots",
+      "pos": [1370, 526],
+      "size": [156, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Codex machine",
+      "wraps": ["codex", "mcp_server", "private_workspace", "grok_cli"],
+      "pad": 20
+    },
+    {
+      "kind": "security-group",
+      "label": "ephemeral prompt boundary",
+      "wraps": ["private_workspace"],
+      "pad": 14
+    },
+    {
+      "kind": "security-group",
+      "label": "paired key boundary",
+      "wraps": ["paired_client"],
+      "pad": 14
+    },
+    {
+      "kind": "region",
+      "label": "Grok Bot VM",
+      "wraps": ["companion", "gateway", "bots"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "from": "codex",
+      "to": "mcp_server",
+      "label": "stdio MCP",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mcp_server",
+      "to": "private_workspace",
+      "label": "one-off ask",
+      "variant": "security",
+      "route": "orthogonal-h"
+    },
+    {
+      "from": "private_workspace",
+      "to": "grok_cli",
+      "label": "fixed argv + prompt file",
+      "variant": "security",
+      "labelAt": [649, 210]
+    },
+    {
+      "from": "grok_cli",
+      "to": "xai",
+      "label": "authenticated Grok session",
+      "variant": "emphasis",
+      "labelAt": [885, 210]
+    },
+    {
+      "from": "mcp_server",
+      "to": "paired_client",
+      "label": "paired Bot tools",
+      "variant": "security",
+      "route": "orthogonal-h"
+    },
+    {
+      "from": "paired_client",
+      "to": "relay",
+      "label": "outbound WSS + AES-256-GCM",
+      "variant": "security",
+      "labelAt": [649, 604]
+    },
+    {
+      "from": "relay",
+      "to": "companion",
+      "label": "opaque frames",
+      "variant": "emphasis",
+      "labelAt": [885, 604]
+    },
+    {
+      "from": "companion",
+      "to": "gateway",
+      "label": "bounded loopback API",
+      "variant": "security",
+      "labelAt": [1120, 604]
+    },
+    {
+      "from": "gateway",
+      "to": "bots",
+      "label": "exact non-group Bot ID",
+      "variant": "emphasis",
+      "labelAt": [1343, 604]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two supported paths",
+      "items": [
+        "Use Grok CLI for a stateless one-off answer",
+        "Use paired mode for persistent named Bots",
+        "Both paths enter through the same local MCP server"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Secrets stay local",
+      "items": [
+        "Grok CLI auth remains on the Codex machine",
+        "Gateway credentials remain inside the VM",
+        "The relay sees connection metadata and ciphertext"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Write safety",
+      "items": [
+        "Recipients bind to ordered exact Bot IDs",
+        "Bulk sends require a fresh roster fingerprint",
+        "Uncertain writes are never retried automatically"
+      ]
+    }
+  ]
+}

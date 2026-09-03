@@ -120,12 +120,23 @@ type PingReceipt = {
   error_code?: string;
 };
 
+const rosterIdentitySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .refine(
+    (value) =>
+      !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value),
+    "Bot identities must be safe single-line display text",
+  );
+
 const transportRosterSchema = z
   .array(
     z
       .object({
-        id: z.string().trim().min(1).max(512),
-        name: z.string().trim().min(1).max(512),
+        id: rosterIdentitySchema,
+        name: rosterIdentitySchema,
         is_running: z.boolean().nullable(),
       })
       .strict(),

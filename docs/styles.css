@@ -471,49 +471,19 @@ img {
   padding-block: 128px;
 }
 
-.problem {
-  border-top: 1px solid var(--line);
-}
-
-.problem-grid,
 .section-heading {
   display: grid;
   grid-template-columns: 1.15fr 0.85fr;
   gap: clamp(48px, 8vw, 120px);
 }
 
-.problem h2,
 .section-heading h2,
-.install-intro h2,
-.beta-section h2,
-.final-cta h2 {
+.install-intro h2 {
   margin: 0;
   font-size: clamp(2.55rem, 4.7vw, 4.8rem);
   font-weight: 720;
   letter-spacing: -0.06em;
   line-height: 0.98;
-}
-
-.problem-list {
-  border-top: 1px solid var(--line);
-}
-
-.problem-list p {
-  display: grid;
-  grid-template-columns: 42px 1fr;
-  gap: 12px;
-  margin: 0;
-  padding: 22px 0;
-  border-bottom: 1px solid var(--line);
-  color: #c0c4ce;
-  font-size: 1rem;
-  line-height: 1.55;
-}
-
-.problem-list span {
-  color: var(--blue);
-  font-family: var(--mono);
-  font-size: 0.7rem;
 }
 
 .section-heading {
@@ -805,7 +775,7 @@ img {
 
 .security-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 14px;
 }
 
@@ -942,73 +912,6 @@ img {
   padding: 27px 22px 30px;
 }
 
-.beta-section {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: clamp(60px, 9vw, 140px);
-  align-items: start;
-}
-
-.status-list {
-  margin: 0;
-  border-top: 1px solid var(--line);
-}
-
-.status-list > div {
-  padding: 22px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.status-list dt {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-  font-weight: 700;
-}
-
-.status-list dd {
-  margin: 0 0 0 20px;
-  color: var(--muted);
-  font-size: 0.82rem;
-}
-
-.status-dot.amber {
-  background: var(--amber);
-  box-shadow: 0 0 0 5px rgba(255, 196, 107, 0.09);
-}
-
-.status-dot.muted-dot {
-  background: #656b78;
-  box-shadow: 0 0 0 5px rgba(101, 107, 120, 0.1);
-}
-
-.final-cta {
-  display: grid;
-  grid-template-columns: 144px 1fr auto;
-  gap: 40px;
-  align-items: center;
-  margin-bottom: 100px;
-  padding: 44px;
-  border: 1px solid var(--line);
-  border-radius: 30px;
-  background: var(--ink-soft);
-}
-
-.final-cta img {
-  border-radius: 30px;
-}
-
-.final-cta h2 {
-  font-size: clamp(2rem, 4vw, 3.8rem);
-}
-
-.final-actions {
-  display: grid;
-  gap: 10px;
-  min-width: 190px;
-}
-
 .site-footer {
   padding-block: 52px;
   border-top: 1px solid var(--line);
@@ -1092,8 +995,7 @@ img {
     grid-template-columns: repeat(2, 1fr);
   }
 
-  .install-shell,
-  .beta-section {
+  .install-shell {
     grid-template-columns: 1fr;
   }
 
@@ -1101,19 +1003,6 @@ img {
     position: static;
   }
 
-  .final-cta {
-    grid-template-columns: 110px 1fr;
-  }
-
-  .final-cta img {
-    width: 110px;
-    height: 110px;
-  }
-
-  .final-actions {
-    grid-column: 1 / -1;
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 
 @media (max-width: 720px) {
@@ -1165,7 +1054,6 @@ img {
     padding-block: 86px;
   }
 
-  .problem-grid,
   .section-heading,
   .capability-grid {
     grid-template-columns: 1fr;
@@ -1227,35 +1115,6 @@ img {
   .install-steps code {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-  }
-
-  .beta-section {
-    gap: 48px;
-  }
-
-  .final-cta {
-    grid-template-columns: 72px 1fr;
-    gap: 24px;
-    margin-bottom: 70px;
-    padding: 24px;
-  }
-
-  .final-cta img {
-    width: 72px;
-    height: 72px;
-    border-radius: 18px;
-  }
-
-  .final-cta .section-kicker {
-    display: none;
-  }
-
-  .final-cta h2 {
-    font-size: 2rem;
-  }
-
-  .final-actions {
-    grid-template-columns: 1fr;
   }
 
   .footer-grid {

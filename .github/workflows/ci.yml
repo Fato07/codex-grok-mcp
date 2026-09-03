@@ -33,9 +33,9 @@ jobs:
 
       - run: npm ci
       - run: npm ci --prefix relay
-      - run: npm run build
       - run: npm run test:all
       - run: npm audit --omit=dev
+      - run: npm audit --prefix relay
 
       - name: Inspect package contents
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22

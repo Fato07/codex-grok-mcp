@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { createDirectGatewayTransport } from "../dist/direct-gateway-transport.js";
 import {
+  listGrokBots,
   MAX_PING_BOTS,
   registerGrokBotTools,
 } from "../dist/grok-bot-gateway.js";
@@ -35,6 +36,18 @@ const BOTS = [
     isGroup: false,
   },
 ];
+
+test("roster identities reject display control characters", async () => {
+  for (const bot of [
+    { id: "bot-1", name: "Ada\nHidden recipient", is_running: false },
+    { id: "bot-\u202e1", name: "Ada", is_running: false },
+  ]) {
+    await assert.rejects(
+      listGrokBots({ listBots: async () => [bot] }),
+      (caught) => caught?.code === "INVALID_RESPONSE",
+    );
+  }
+});
 
 test("plugin timeout covers worst-case sequential paired ping-all", () => {
   const plugin = JSON.parse(
@@ -707,7 +720,7 @@ test("persistent Bot tools are opt-in and partial gateway credentials fail close
       experimental: true,
       state: "not_paired",
       mode: "unpaired",
-      server_version: "0.2.0-beta.4",
+      server_version: "0.2.0-beta.5",
     });
     assert.match(status.content[0].text, /not paired/i);
   } finally {
@@ -739,7 +752,7 @@ test("paired bridge status exposes only allowlisted metadata", async () => {
     secret,
     async bridgeStatus() {
       return {
-        companion_version: "0.2.0-beta.4",
+        companion_version: "0.2.0-beta.5",
         supported_protocol_versions: [1, 2, 3],
         capabilities: ["status", "list_bots", "read_bot", "send_message"],
         gateway_healthy: true,
@@ -768,8 +781,8 @@ test("paired bridge status exposes only allowlisted metadata", async () => {
       experimental: true,
       state: "connected",
       mode: "paired_relay",
-      server_version: "0.2.0-beta.4",
-      companion_version: "0.2.0-beta.4",
+      server_version: "0.2.0-beta.5",
+      companion_version: "0.2.0-beta.5",
       supported_protocol_versions: [1, 2, 3],
       capabilities: ["status", "list_bots", "read_bot", "send_message"],
       gateway_healthy: true,
@@ -786,7 +799,7 @@ test("paired bridge status rejects an incomplete capability handshake", async ()
   const transport = {
     async bridgeStatus() {
       return {
-        companion_version: "0.2.0-beta.4",
+        companion_version: "0.2.0-beta.5",
         supported_protocol_versions: [1],
         capabilities: ["list_bots", "future_capability"],
         gateway_healthy: true,
@@ -862,7 +875,7 @@ test("configured gateway exposes roster and exact-ID send with an acceptance rec
       experimental: true,
       state: "configured",
       mode: "legacy_direct",
-      server_version: "0.2.0-beta.4",
+      server_version: "0.2.0-beta.5",
     });
     assert.equal(gateway.requests.length, 0);
 

@@ -4,64 +4,57 @@ Thanks for helping keep this bridge small, safe, and dependable.
 
 ## Before opening a change
 
-- Use an issue or discussion before adding tools, adapters, dependencies, authentication paths, or new supported platforms.
-- Preserve the isolated `grok_ask` boundary. Experimental persistent Bot support must stay opt-in, separately paired, and unavailable without a validated private pairing file.
-- Never include credentials, `~/.grok/auth.json`, private prompts, responses, transcripts, or unredacted logs.
-- Never scrape Grok Bot app state, decrypt descriptors, read Keychain, or infer gateway credentials.
+- Open an issue or discussion before adding a tool, adapter, dependency, authentication path, or supported platform.
+- Keep `grok_ask` isolated from persistent Bot support.
+- Never commit credentials, authentication files, private prompts, responses, transcripts, or unredacted logs.
+- Never scrape Grok Bot state, decrypt descriptors, read Keychain, or infer gateway credentials.
 
 ## Local setup
 
 ```bash
 npm ci
-npm run typecheck
+npm ci --prefix relay
 npm run test:all
-npm run build
-npm run doctor
 ```
 
-Use a real live call only with your own Grok account and data you are authorized to send. Unit tests must not require network access or real authentication.
+`npm run doctor` is optional and requires a local Grok CLI login. It checks setup without sending a model request. Live tests must use your own account and data you are allowed to share; automated tests must use mocks.
 
 ## Pull requests
 
 Keep pull requests focused. Include:
 
-- the user-visible problem and why the existing behavior is insufficient;
-- the smallest implementation that fixes it;
-- one focused regression test for non-trivial behavior;
-- compatibility and security-boundary impact;
-- documentation changes when commands or behavior change;
-- upstream source and license attribution for adapted code.
+- the user-visible problem;
+- the smallest complete fix;
+- one regression test for non-trivial behavior;
+- any compatibility or security-boundary change;
+- documentation updates when commands or behavior change;
+- attribution for adapted code.
 
 Before requesting review, run:
 
 ```bash
-npm run typecheck
 npm run test:all
-python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/codex-grok-mcp
+npm audit --omit=dev
+npm audit --prefix relay
+npm pack --dry-run
 ```
 
-Do not update generated package versions in feature pull requests unless the maintainer asks. Do not add postinstall scripts or telemetry.
+Do not add postinstall scripts or telemetry. Version changes belong in release work, not ordinary feature pull requests.
 
 ## Compatibility claims
 
-Mocks and unit tests are not platform proof. To add a supported compatibility row, provide a redacted live smoke-test result showing the OS/architecture, Node version, Codex version, Grok CLI version, selected model, and successful response. Do not include response content.
+Mocks are not platform proof. A new supported environment needs a redacted live result containing OS, architecture, Node, Codex, Grok CLI, selected model, and a successful response. Do not include response content.
 
-## New adapters and tools
+## Adapters and Bot tools
 
-The core `grok_ask` tool stays isolated from optional adapters. A new adapter needs:
+New adapters need a documented upstream contract, operator-authorized credentials or pairing, a maintenance owner, tests, and a separate opt-in configuration path.
 
-- a documented upstream contract and operator-authorized credentials or pairing;
-- an identified maintenance owner;
-- a separate explicit configuration path;
-- tests and threat-boundary documentation;
-- no scraping, Keychain extraction, internal gateway credentials, or silent fallback.
+For persistent Bot changes, preserve exact-ID and non-group checks, bounded sanitized reads, explicit no-correlation and no-completion claims, and no automatic write retries. Bulk writes must keep the roster fingerprint, exact ordered IDs, and native confirmation. Ambiguous writes remain `outcome_unknown`; cancelled remaining recipients stay `not_attempted`.
 
-Persistent Grok Bot integration is accepted only through an official inbound API or a clearly separated experimental adapter.
-
-The paired bridge is the narrow exception: its bounded local client discovers the loopback gateway only inside the Grok VM; the gateway token never leaves that VM; the self-hosted relay authenticates native clients before allocation and forwards only authenticated ciphertext; the companion exposes only metadata-only status, roster listing, exact-ID bounded text/status reads, and exact-ID sends. Preserve the strict status allowlist; exact-ID and non-group checks; text-only sanitization and byte ceilings; Bot-bound opaque pagination; the untrusted-content, no-correlation, and no-completion-claim boundaries; and protocol-v3 status plus protocol-v2 reads with explicit `UPGRADE_REQUIRED` for an older companion while v1 list/send remains compatible. For writes, preserve fingerprint-bound plus native-user-confirmed `PING`-to-all, sequential one-shot delivery, cached replay receipts, per-Bot receipts, no automatic retries, `outcome_unknown` for ambiguous sends, and `not_attempted` after cancellation. Keep the legacy URL/token transport out of the default plugin environment. Tests must use mock gateways/relays; distinguish metadata-only live probes from live read or message compatibility.
+Keep the legacy URL/token adapter out of the default plugin environment. Use mock gateways and relays in tests.
 
 ## Governance and license
 
 Fato07 is the initial maintainer. Maintainer approval and passing checks are required to merge. There is no CLA or DCO at this stage.
 
-By contributing, you agree that your contribution is licensed under the repository's MIT License and that you have the right to submit it.
+Contributions are licensed under the repository's MIT License.

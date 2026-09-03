@@ -1,6 +1,6 @@
 {
   "name": "codex-grok-mcp",
-  "version": "0.2.0-beta.4",
+  "version": "0.2.0-beta.5",
   "description": "Unofficial local MCP bridge from Codex to isolated Grok calls and experimental persistent Grok Bots.",
   "author": "Fato07",
   "repository": {
@@ -10,7 +10,7 @@
   "bugs": {
     "url": "https://github.com/Fato07/codex-grok-mcp/issues"
   },
-  "homepage": "https://github.com/Fato07/codex-grok-mcp#readme",
+  "homepage": "https://fato07.github.io/codex-grok-mcp/",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -19,7 +19,6 @@
   },
   "files": [
     "dist",
-    "plugins/codex-grok-mcp/assets/icon.png",
     "relay/.dev.vars.example",
     "relay/README.md",
     "relay/package-lock.json",
@@ -45,9 +44,9 @@
     "bridge:probe": "node dist/bridge-companion.js probe",
     "doctor": "node dist/index.js --doctor",
     "test": "npm run build && node --test test/*.test.mjs",
-    "test:relay": "npm --prefix relay test",
+    "test:relay": "npm --prefix relay run check && npm --prefix relay test",
     "test:all": "npm test && npm run test:relay",
-    "prepublishOnly": "npm --prefix relay ci && npm run typecheck && npm run test:all",
+    "prepublishOnly": "npm --prefix relay ci && npm run test:all",
     "prepare": "npm run build"
   },
   "keywords": [
