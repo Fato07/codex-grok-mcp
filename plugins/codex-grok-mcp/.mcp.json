@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "grok": {
-      "command": "codex-grok-mcp",
-      "args": [],
+      "command": "npx",
+      "args": [
+        "--yes",
+        "--package=codex-grok-mcp@0.2.0-beta.1",
+        "codex-grok-mcp"
+      ],
       "env_vars": [
         "GROK_MCP_BIN",
         "GROK_MCP_MODEL",

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`0.2.0-beta.1` is an unreleased beta. Until a public release exists, only the current source revision is considered for security fixes.
+`0.2.0-beta.1` is the supported public beta. Security fixes target the current source revision and the next prerelease.
 
 ## Trust boundary
 
