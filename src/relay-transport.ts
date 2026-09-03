@@ -44,6 +44,27 @@ function error(
   return new GrokBotGatewayError(code, message, options);
 }
 
+async function waitForQueue(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) {
+    await previous;
+    return;
+  }
+  if (signal.aborted) throw error("CANCELLED", "Grok Bot relay request was cancelled.");
+
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      previous,
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(error("CANCELLED", "Grok Bot relay request was cancelled."));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 function relaySocketUrl(config: PairingConfig, role: "codex" | "bridge"): string {
   const url = new URL(config.relayUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/${config.channel}`;
@@ -205,13 +226,21 @@ export type RelayTransport = GrokBotTransport & BridgeStatusProvider;
 
 export function createRelayTransport(config: PairingConfig): RelayTransport {
   let queue: Promise<void> = Promise.resolve();
-  const runExclusive = async <T>(operation: () => Promise<T>): Promise<T> => {
+  const runExclusive = async <T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> => {
     const previous = queue;
     let release: () => void = () => undefined;
     queue = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await previous;
+    try {
+      await waitForQueue(previous, signal);
+    } catch (caught) {
+      void previous.then(release);
+      throw caught;
+    }
     try {
       return await operation();
     } finally {
@@ -238,7 +267,7 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
           throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
         }
         return response.result;
-      });
+      }, signal);
     },
     async listBots(signal?: AbortSignal) {
       return runExclusive(async () => {
@@ -252,7 +281,7 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
           throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
         }
         return response.result.bots;
-      });
+      }, signal);
     },
     async readBot(botId, options, signal) {
       return runExclusive(async () => {
@@ -278,7 +307,7 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
           throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
         }
         return response.result;
-      });
+      }, signal);
     },
     async sendMessage(botId: string, message: string, signal?: AbortSignal) {
       return runExclusive(async () => {
@@ -298,7 +327,7 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
           throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
         }
         return { accepted: true, requestId: response.result.request_id };
-      });
+      }, signal);
     },
   };
 }

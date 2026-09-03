@@ -12,6 +12,7 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - A legacy direct URL/token transport retained outside the default plugin wrapper for power users.
 - `grok_list_bots` for exact IDs, names, running state, and a roster fingerprint.
 - `grok_read_bot` for exact-ID, read-only activity snapshots and bounded sanitized recent text, with Bot-bound opaque pagination and explicit untrusted-content, no-correlation, and no-completion-claim boundaries.
+- `grok_wait_for_bot` for bounded read-only polling until activity is idle, awaiting the user, or the timeout expires; failed reads are never retried.
 - `grok_send_bot_message` for one exact-ID send with a gateway-acceptance receipt.
 - `grok_ping_all_bots`: no-write preview, fingerprint-bound second call, native MCP user confirmation, then sequential `PING` sends with per-Bot receipts and no automatic retries.
 - Honest uncertain-write receipts: interrupted sends are `outcome_unknown`; cancellation leaves remaining Bots `not_attempted`.
@@ -20,6 +21,7 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - Persistent private replay state that survives companion restarts, plus an exclusive fail-closed companion lease that blocks concurrent `run`, forced reconnect, and unpair operations without racing to reclaim stale locks.
 - Per-operation gateway descriptor/token pinning, pre/post-response verification, fail-closed rotation detection, and no automatic retry.
 - Always-available `grok_bridge_status`, with safe unpaired/direct states and an authenticated paired protocol-v3 capability and health handshake.
+- Abort-aware relay queueing and companion-close propagation, so cancelled waits exit promptly and older companions surface `UPGRADE_REQUIRED` instead of timing out.
 - Loopback gateway process verification and explicit relay observability disablement.
 - A live paired smoke test listed 20 Bots, obtained 20 unique exact-ID gateway acceptance receipts, and observed later bounded Bot transcript entries without connector errors or retries. This proves asynchronous outbound and inbound operation, not reply correlation or task completion.
 

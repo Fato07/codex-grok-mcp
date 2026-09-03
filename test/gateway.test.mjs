@@ -70,14 +70,18 @@ async function openMcp(env, { approvePingAll = false, server } = {}) {
     pending.delete(message.id);
     resolve?.(message);
   };
-  const request = async (method, params = {}) => {
+  const startRequest = (method, params = {}) => {
     const id = ++nextId;
     const response = new Promise((resolve) => pending.set(id, resolve));
-    await clientTransport.send({ jsonrpc: "2.0", id, method, params });
-    const message = await response;
-    if ("error" in message) throw new Error(JSON.stringify(message.error));
-    return message.result;
+    const result = (async () => {
+      await clientTransport.send({ jsonrpc: "2.0", id, method, params });
+      const message = await response;
+      if ("error" in message) throw new Error(JSON.stringify(message.error));
+      return message.result;
+    })();
+    return { id, result };
   };
+  const request = async (method, params = {}) => (await startRequest(method, params).result);
 
   await mcpServer.connect(serverTransport);
   await clientTransport.start();
@@ -91,6 +95,13 @@ async function openMcp(env, { approvePingAll = false, server } = {}) {
   return {
     elicitationRequests,
     request,
+    startRequest,
+    cancel: (requestId) =>
+      clientTransport.send({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId },
+      }),
     async close() {
       await clientTransport.close();
       await mcpServer.close();
@@ -450,6 +461,232 @@ test("read Bot activity state uses conservative evidence precedence", async () =
   }
 });
 
+test("wait for Bot polls successful reads until idle", async () => {
+  let readCount = 0;
+  let listCount = 0;
+  const transport = {
+    async listBots() {
+      listCount += 1;
+      return [{ id: BOTS[0].id, name: BOTS[0].name, is_running: true }];
+    },
+    async readBot(botId, options) {
+      readCount += 1;
+      const working = readCount === 1;
+      assert.deepEqual(options, { limit: 7 });
+      return {
+        bot_id: botId,
+        is_running: working,
+        is_composing: false,
+        awaiting_user: false,
+        async_task_count: 0,
+        running_subagent_count: 0,
+        messages: [{ speaker: "bot", text: working ? "working" : "idle", timestamp_ms: null }],
+        next_before_sequence: 4,
+        truncated: false,
+      };
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const server = new McpServer({ name: "wait-idle-test", version: "1" });
+  registerGrokBotTools(server, transport);
+  const mcp = await openMcp({}, { server });
+
+  try {
+    const listed = await mcp.request("tools/list");
+    const tool = listed.tools.find(({ name }) => name === "grok_wait_for_bot");
+    assert.deepEqual(tool.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
+
+    const result = await mcp.request("tools/call", {
+      name: "grok_wait_for_bot",
+      arguments: { bot_id: BOTS[0].id, timeout_seconds: 5, limit: 7 },
+    });
+    assert.equal(result.structuredContent.stop_reason, "idle");
+    assert.equal(result.structuredContent.observed_working, true);
+    assert.equal(result.structuredContent.activity_state, "idle");
+    assert.equal(result.structuredContent.observations, 2);
+    assert.equal(result.structuredContent.messages[0].text, "idle");
+    assert(result.structuredContent.elapsed_ms >= 3_000);
+    assert.equal(result.structuredContent.correlation, "not_claimed");
+    assert.equal(result.structuredContent.content_boundary, "sanitized_text_only");
+    assert.equal(
+      result.structuredContent.completion_boundary,
+      "activity_snapshot_not_task_completion",
+    );
+    assert.equal(result.structuredContent.untrusted_external_content, true);
+    assert.equal(listCount, 1);
+    assert.equal(readCount, 2);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("wait for Bot timeout returns the latest successful snapshot", async () => {
+  let readCount = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOTS[0].id, name: BOTS[0].name, is_running: true }];
+    },
+    async readBot(botId) {
+      readCount += 1;
+      return {
+        bot_id: botId,
+        is_running: true,
+        is_composing: false,
+        awaiting_user: false,
+        async_task_count: 0,
+        running_subagent_count: 0,
+        messages: [{ speaker: "bot", text: `observation-${readCount}`, timestamp_ms: null }],
+        next_before_sequence: null,
+        truncated: false,
+      };
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const server = new McpServer({ name: "wait-timeout-test", version: "1" });
+  registerGrokBotTools(server, transport);
+  const mcp = await openMcp({}, { server });
+
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_wait_for_bot",
+      arguments: { bot_id: BOTS[0].id, timeout_seconds: 1 },
+    });
+    assert.equal(result.structuredContent.stop_reason, "timeout");
+    assert.equal(result.structuredContent.observed_working, true);
+    assert.equal(result.structuredContent.observations, 1);
+    assert.equal(result.structuredContent.messages[0].text, "observation-1");
+    assert(result.structuredContent.elapsed_ms >= 1_000);
+    assert.equal(readCount, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("wait for Bot does not retry a failed read", async () => {
+  let readCount = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOTS[0].id, name: BOTS[0].name, is_running: true }];
+    },
+    async readBot(botId) {
+      readCount += 1;
+      assert.equal(botId, BOTS[0].id);
+      throw new Error("transport failed");
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const server = new McpServer({ name: "wait-failure-test", version: "1" });
+  registerGrokBotTools(server, transport);
+  const mcp = await openMcp({}, { server });
+
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_wait_for_bot",
+      arguments: { bot_id: BOTS[0].id, timeout_seconds: 5 },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /^\[UNAVAILABLE\]/);
+    assert.equal(readCount, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("wait for Bot cancels an in-flight read at its own deadline", async () => {
+  let readCount = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOTS[0].id, name: BOTS[0].name, is_running: true }];
+    },
+    async readBot(_botId, _options, signal) {
+      readCount += 1;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const server = new McpServer({ name: "wait-deadline-test", version: "1" });
+  registerGrokBotTools(server, transport);
+  const mcp = await openMcp({}, { server });
+
+  try {
+    const startedAt = Date.now();
+    const result = await mcp.request("tools/call", {
+      name: "grok_wait_for_bot",
+      arguments: { bot_id: BOTS[0].id, timeout_seconds: 1 },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /^\[TIMEOUT\]/);
+    assert(Date.now() - startedAt < 2_000);
+    assert.equal(readCount, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("MCP cancellation aborts a Bot wait without another read", async () => {
+  let readCount = 0;
+  let resolveAborted;
+  const aborted = new Promise((resolve) => {
+    resolveAborted = resolve;
+  });
+  const transport = {
+    async listBots() {
+      return [{ id: BOTS[0].id, name: BOTS[0].name, is_running: true }];
+    },
+    async readBot(botId, _options, signal) {
+      readCount += 1;
+      signal.addEventListener("abort", resolveAborted, { once: true });
+      return {
+        bot_id: botId,
+        is_running: true,
+        is_composing: false,
+        awaiting_user: false,
+        async_task_count: 0,
+        running_subagent_count: 0,
+        messages: [],
+        next_before_sequence: null,
+        truncated: false,
+      };
+    },
+    async sendMessage() {
+      throw new Error("not used");
+    },
+  };
+  const server = new McpServer({ name: "wait-cancel-test", version: "1" });
+  registerGrokBotTools(server, transport);
+  const mcp = await openMcp({}, { server });
+
+  try {
+    const pendingWait = mcp.startRequest("tools/call", {
+      name: "grok_wait_for_bot",
+      arguments: { bot_id: BOTS[0].id, timeout_seconds: 120 },
+    });
+    while (readCount === 0) await new Promise((resolve) => setImmediate(resolve));
+    void pendingWait.result.catch(() => undefined);
+    await mcp.cancel(pendingWait.id);
+    await aborted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(readCount, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
 test("persistent Bot tools are opt-in and partial gateway credentials fail closed", async () => {
   const mcp = await openMcp({});
   try {
@@ -611,6 +848,7 @@ test("configured gateway exposes roster and exact-ID send with an acceptance rec
         "grok_bridge_status",
         "grok_list_bots",
         "grok_read_bot",
+        "grok_wait_for_bot",
         "grok_send_bot_message",
         "grok_ping_all_bots",
       ],

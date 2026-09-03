@@ -75,6 +75,51 @@ test("relay transport performs an authenticated metadata-only status handshake",
   }
 });
 
+test("relay transport cancels while waiting for its serialized turn", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  let connectionCount = 0;
+  let firstSeenResolve;
+  const firstSeen = new Promise((resolve) => {
+    firstSeenResolve = resolve;
+  });
+  server.on("connection", (socket) => {
+    connectionCount += 1;
+    socket.once("message", () => firstSeenResolve());
+  });
+
+  try {
+    const transport = createRelayTransport(config);
+    const firstController = new AbortController();
+    const first = transport.listBots(firstController.signal);
+    await firstSeen;
+
+    const queuedController = new AbortController();
+    const queued = transport.listBots(queuedController.signal);
+    queuedController.abort();
+    await assert.rejects(
+      queued,
+      (caught) => caught instanceof GrokBotGatewayError && caught.code === "CANCELLED",
+    );
+    assert.equal(connectionCount, 1);
+
+    firstController.abort();
+    await assert.rejects(
+      first,
+      (caught) => caught instanceof GrokBotGatewayError && caught.code === "CANCELLED",
+    );
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+  }
+});
+
 test("relay transport treats a post-send 4404 close as uncertain without retry", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(server, "listening");

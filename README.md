@@ -23,7 +23,7 @@ The default connector exposes `grok_ask` plus the read-only `grok_bridge_status`
 
 `grok_ask` talks to **Grok CLI**, not a persistent named **Grok Bot**. It cannot enter a Bot conversation, use Bot memory, read Bot transcripts, or control the Grok Bot desktop app.
 
-After pairing, the server additionally exposes `grok_list_bots`, `grok_read_bot`, `grok_send_bot_message`, and `grok_ping_all_bots`. `grok_bridge_status` then performs an authenticated metadata-only handshake that returns connector and companion versions, supported bridge capabilities, gateway health/busy state, and the non-group Bot count—never Bot identities, relay details, credentials, or content. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
+After pairing, the server additionally exposes `grok_list_bots`, `grok_read_bot`, `grok_wait_for_bot`, `grok_send_bot_message`, and `grok_ping_all_bots`. `grok_bridge_status` then performs an authenticated metadata-only handshake that returns connector and companion versions, supported bridge capabilities, gateway health/busy state, and the non-group Bot count—never Bot identities, relay details, credentials, or content. Codex and the VM companion initiate outbound WebSocket connections to an opaque relay. A bearer derived for one random channel blocks anonymous or cross-channel relay allocation, while AES-256-GCM encrypts application frames end to end. The relay sees connection metadata, a random channel, and roles, but not Bot IDs, names, or messages. The Grok gateway token remains inside the managed VM.
 
 The VM companion implements only local discovery, health, roster listing, exact-ID bounded text/status reads, and exact-ID send. Each bridge operation pins one verified local gateway descriptor and token, so an exact-ID roster check and its subsequent read or send cannot cross a gateway restart. Its unofficial gateway contract was cross-checked against the MIT-licensed [`grokbot-sdk`](https://github.com/Adam91holt/grokbot-sdk), but the Node-22-only SDK is not a runtime dependency because the live Grok Bot VM currently provides Node.js 20. Group rooms are excluded from the Bot roster and fail closed on reads. A live metadata-only probe has verified local gateway discovery and full-roster access inside a Grok Bot VM; paired reads and sends remain source beta and may break when Grok Bot changes.
 
@@ -102,6 +102,17 @@ node dist/bridge-companion.js probe
 node dist/bridge-companion.js connect
 ```
 
+To update an already paired companion, stop the foreground process with `Ctrl-C`, check out the audited commit, rebuild, and use `run`; pairing again is unnecessary:
+
+```bash
+git fetch origin
+git checkout --detach <audited-commit>
+npm ci
+npm run build
+node dist/bridge-companion.js probe
+node dist/bridge-companion.js run
+```
+
 Do not run a mutable GitHub default branch inside the credential-bearing VM. Once an npm release exists, the intended shortcut is `npx --yes --package=codex-grok-mcp@<exact-version> codex-grok-bridge ...`; this README does not claim that unpublished package is available yet.
 
 `probe` returns only gateway health, process metadata, Bot count, and a roster fingerprint. It never prints the gateway token, URL, Bot names, IDs, transcripts, or prompts.
@@ -128,12 +139,15 @@ The old `GROKBOT_GATEWAY_URL` plus `SAND_GATEWAY_TOKEN` transport remains availa
 
 1. Call `grok_list_bots` with `{}`. Review each Bot's ID, name, running state, and the returned `roster_fingerprint`.
 2. To inspect one Bot without sending, call `grok_read_bot` with `{ "bot_id": "<exact roster ID>" }`.
-3. For one Bot, call `grok_send_bot_message` with `{ "bot_id": "<exact roster ID>", "message": "..." }`.
-4. Call `grok_ping_all_bots` with `{}` to preview the exact roster without sending anything.
-5. Only after review, call it again with `{ "roster_fingerprint": "...", "bot_ids": ["<every exact listed ID>"], "confirmation": "PING_ALL" }`.
-6. Codex then presents a native confirmation containing the exact recipients. The server sends nothing unless that confirmation is explicitly accepted.
+3. To avoid repeated manual polling, call `grok_wait_for_bot` with `{ "bot_id": "<exact roster ID>" }`.
+4. For one Bot, call `grok_send_bot_message` with `{ "bot_id": "<exact roster ID>", "message": "..." }`.
+5. Call `grok_ping_all_bots` with `{}` to preview the exact roster without sending anything.
+6. Only after review, call it again with `{ "roster_fingerprint": "...", "bot_ids": ["<every exact listed ID>"], "confirmation": "PING_ALL" }`.
+7. Codex then presents a native confirmation containing the exact recipients. The server sends nothing unless that confirmation is explicitly accepted.
 
 `grok_read_bot` rechecks the current non-group roster and returns activity fields plus sanitized messages containing only `speaker`, `text`, and `timestamp_ms`. Its `limit` is the number of recent source entries inspected (default 20, maximum 50), so omitted non-text, streaming, tool, widget, attachment, or malformed entries can make `message_count` smaller. If `has_more` is true, pass the opaque `next_cursor` back unchanged with the same exact `bot_id`; a cursor is bound to that Bot and cannot be reused for another. Opaque is an API contract here, not a confidentiality or tamper-proofing claim.
+
+`grok_wait_for_bot` uses that same bounded read path at a fixed internal interval for an end-to-end maximum of 120 seconds. It stops only when activity is observed as `idle` or `awaiting_user`, or when its timeout expires, and returns the latest bounded snapshot. `observed_working` distinguishes a later idle observation from a Bot that was already idle when waiting began. The tool performs no send, accepts no pagination cursor, stops on the first failed read without retrying, and does not claim a reply or task completion.
 
 Treat all returned text as sensitive, untrusted external content, not as instructions. `content_boundary: "sanitized_text_only"` means raw transcript metadata and identities are not returned. `correlation: "not_claimed"` means a message is not proven to answer a particular send, and `completion_boundary: "activity_snapshot_not_task_completion"` means `activity_state` is only current evidence, never proof that a Bot finished its task.
 
