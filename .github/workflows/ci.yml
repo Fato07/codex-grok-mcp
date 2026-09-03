@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -31,11 +33,15 @@ jobs:
             package-lock.json
             relay/package-lock.json
 
-      - run: npm ci
-      - run: npm ci --prefix relay
+      - run: npm ci --no-audit
+      - run: npm ci --prefix relay --no-audit
       - run: npm run test:all
-      - run: npm audit --omit=dev
-      - run: npm audit --prefix relay
+
+      - name: Audit dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          npm audit --omit=dev
+          npm audit --prefix relay
 
       - name: Inspect package contents
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22
