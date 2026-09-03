@@ -4,6 +4,12 @@
   <img src="plugins/codex-grok-mcp/assets/icon.png" alt="Codex Grok MCP icon" width="180" />
 </p>
 
+<p align="center">
+  <a href="https://fato07.github.io/codex-grok-mcp/">Website</a> ·
+  <a href="https://www.npmjs.com/package/codex-grok-mcp">npm</a> ·
+  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.3">v0.2.0-beta.3</a>
+</p>
+
 An unofficial, local-first MCP bridge that lets Codex ask the authenticated Grok CLI for a bounded second opinion. Its experimental paired bridge can also read bounded status and sanitized recent text from, or message, an exact persistent Grok Bot without exporting Grok Bot's gateway credential.
 
 > [!IMPORTANT]

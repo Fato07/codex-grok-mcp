@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://fato07.github.io/codex-grok-mcp/sitemap.xml
