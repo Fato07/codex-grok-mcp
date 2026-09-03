@@ -4,7 +4,8 @@ Thanks for helping keep this bridge small, safe, and dependable.
 
 ## Before opening a change
 
-- Open an issue or discussion before adding a tool, adapter, dependency, authentication path, or supported platform.
+- Use the [bug report form](https://github.com/Fato07/codex-grok-mcp/issues/new?template=bug-report.yml) for reproducible defects.
+- Open a [feature request](https://github.com/Fato07/codex-grok-mcp/issues/new?template=feature-request.yml) before adding a tool, adapter, dependency, authentication path, or supported platform.
 - Keep `grok_ask` isolated from persistent Bot support.
 - Never commit credentials, authentication files, private prompts, responses, transcripts, or unredacted logs.
 - Never scrape Grok Bot state, decrypt descriptors, read Keychain, or infer gateway credentials.
