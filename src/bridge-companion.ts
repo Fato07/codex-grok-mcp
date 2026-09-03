@@ -21,6 +21,7 @@ import {
   type BridgeResponse,
 } from "./bridge-protocol.js";
 import {
+  BridgePairingError,
   decryptFrame,
   defaultBridgeConfigPath,
   encryptFrame,
@@ -42,6 +43,7 @@ import {
 const PROBE_TIMEOUT_MS = 5_000;
 const BRIDGE_GATEWAY_TIMEOUT_MS = 10_000;
 const MAX_RELAY_FRAME_BYTES = 128 * 1024;
+const FRAME_AUTH_FAILED_CLOSE_CODE = 4401;
 const REQUEST_FRESHNESS_MS = 60_000;
 const REPLAY_RETENTION_MS = REQUEST_FRESHNESS_MS * 2;
 const MAX_RECENT_REQUESTS = 1_024;
@@ -339,8 +341,13 @@ async function connectOnce(
         try {
           const plaintext = decryptFrame(config, "codex", textFrame(data, isBinary));
           request = bridgeRequestSchema.parse(JSON.parse(plaintext.toString("utf8")));
-        } catch {
-          socket.close(4400, "invalid frame");
+        } catch (caught) {
+          const authenticationFailed =
+            caught instanceof BridgePairingError && caught.code === "frame_auth_failed";
+          socket.close(
+            authenticationFailed ? FRAME_AUTH_FAILED_CLOSE_CODE : 4400,
+            authenticationFailed ? "authentication failed" : "invalid frame",
+          );
           return;
         }
 

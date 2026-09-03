@@ -19,6 +19,7 @@ export const RELAY_TIMEOUT_MS = 15_000;
 const MAX_RELAY_FRAME_BYTES = 128 * 1024;
 const PEER_UNAVAILABLE_CLOSE_CODE = 4404;
 const INVALID_FRAME_CLOSE_CODE = 4400;
+const FRAME_AUTH_FAILED_CLOSE_CODE = 4401;
 
 const remoteErrorMessages: Record<BridgeErrorCode, string> = {
   AUTH_FAILED: "Grok Bot companion authentication failed.",
@@ -179,18 +180,25 @@ async function requestRelay(
 
     socket.once("close", (code) => {
       const peerUnavailable = code === PEER_UNAVAILABLE_CLOSE_CODE;
+      const authenticationFailed = code === FRAME_AUTH_FAILED_CLOSE_CODE;
       const upgradeRequired =
         (request.op === "read_bot" || request.op === "status") &&
         code === INVALID_FRAME_CLOSE_CODE;
       finish({
         kind: "reject",
         value: error(
-          upgradeRequired ? "UPGRADE_REQUIRED" : "UNAVAILABLE",
-          upgradeRequired
-            ? "Grok Bot companion rejected this bridge protocol. Update and restart codex-grok-bridge from the latest codex-grok-mcp in the Grok Bot Computer."
-            : peerUnavailable
-              ? "Grok Bot companion is offline."
-              : "Grok Bot relay connection closed.",
+          authenticationFailed
+            ? "AUTH_FAILED"
+            : upgradeRequired
+              ? "UPGRADE_REQUIRED"
+              : "UNAVAILABLE",
+          authenticationFailed
+            ? remoteErrorMessages.AUTH_FAILED
+            : upgradeRequired
+              ? "Grok Bot companion rejected this bridge protocol. Update and restart codex-grok-bridge from the latest codex-grok-mcp in the Grok Bot Computer."
+              : peerUnavailable
+                ? "Grok Bot companion is offline."
+                : "Grok Bot relay connection closed.",
           {
             deliveryMayHaveOccurred: uncertain(),
             requestId: request.id,

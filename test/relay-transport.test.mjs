@@ -265,3 +265,53 @@ test("relay status gives an actionable upgrade error for a legacy companion", as
     });
   }
 });
+
+test("relay maps pairing authentication failures without retrying or downgrading uncertainty", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  let connectionCount = 0;
+  server.on("connection", (socket) => {
+    connectionCount += 1;
+    socket.once("message", () => socket.close(4401, "untrusted pairing detail"));
+  });
+
+  try {
+    const transport = createRelayTransport(config);
+    await assert.rejects(
+      transport.bridgeStatus(),
+      (caught) => {
+        assert(caught instanceof GrokBotGatewayError);
+        assert.equal(caught.code, "AUTH_FAILED");
+        assert.equal(caught.deliveryMayHaveOccurred, false);
+        assert.equal(caught.message, "Grok Bot companion authentication failed.");
+        assert(!caught.message.includes(config.key));
+        assert(!caught.message.includes("untrusted pairing detail"));
+        return true;
+      },
+    );
+
+    const secretMessage = "private message with a mismatched pairing key";
+    await assert.rejects(
+      transport.sendMessage("bot-1", secretMessage),
+      (caught) => {
+        assert(caught instanceof GrokBotGatewayError);
+        assert.equal(caught.code, "AUTH_FAILED");
+        assert.equal(caught.deliveryMayHaveOccurred, true);
+        assert.equal(caught.message, "Grok Bot companion authentication failed.");
+        assert(!caught.message.includes(secretMessage));
+        assert(!caught.message.includes("untrusted pairing detail"));
+        return true;
+      },
+    );
+    assert.equal(connectionCount, 2);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+  }
+});

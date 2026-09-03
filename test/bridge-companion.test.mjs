@@ -207,6 +207,60 @@ test("status handshake returns only allowlisted companion and gateway metadata",
   assert(!serialized.includes("Private group"));
 });
 
+test("companion distinguishes wrong pairing keys from invalid frames and requests", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-replay-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const relayUrl = `ws://127.0.0.1:${address.port}/v1/connect`;
+  const config = parsePairCode(generatePairCode(relayUrl));
+  const wrongConfig = {
+    ...config,
+    key: parsePairCode(generatePairCode(relayUrl)).key,
+  };
+
+  const rejection = async (frame) => {
+    const controller = new AbortController();
+    const connected = once(relay, "connection");
+    const bridge = runBridge(config, {}, controller.signal, replayRoot);
+    try {
+      const [socket] = await connected;
+      const closed = once(socket, "close");
+      socket.send(frame);
+      return await closed;
+    } finally {
+      controller.abort();
+      await bridge;
+    }
+  };
+
+  try {
+    const [wrongKeyCode, wrongKeyReason] = await rejection(
+      encryptFrame(wrongConfig, "codex", "{}"),
+    );
+    assert.equal(wrongKeyCode, 4401);
+    assert.equal(wrongKeyReason.toString(), "authentication failed");
+    assert(!wrongKeyReason.toString().includes(config.key));
+    assert(!wrongKeyReason.toString().includes(wrongConfig.key));
+
+    const [invalidFrameCode, invalidFrameReason] = await rejection("AA");
+    assert.equal(invalidFrameCode, 4400);
+    assert.equal(invalidFrameReason.toString(), "invalid frame");
+
+    const [invalidRequestCode, invalidRequestReason] = await rejection(
+      encryptFrame(config, "codex", "{}"),
+    );
+    assert.equal(invalidRequestCode, 4400);
+    assert.equal(invalidRequestReason.toString(), "invalid frame");
+  } finally {
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
 test("companion replays the authenticated receipt without sending twice", async () => {
   const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-replay-"));
   const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });

@@ -123,5 +123,21 @@ it("validates, routes opaque frames, caps frames, reports availability, and repl
   expect(rejection.code).toBe(4400);
   expect(rejection.reason).toBe("peer rejected frame");
 
+  const pairingCodex = await connect(CHANNEL, "codex");
+  const pairingBridge = await connect(CHANNEL, "bridge");
+  const pairingFailure = event(pairingCodex, "close");
+  pairingBridge.close(4401, "untrusted pairing detail");
+  const pairingEvent = await pairingFailure;
+  expect(pairingEvent.code).toBe(4401);
+  expect(pairingEvent.reason).toBe("peer authentication failed");
+
+  const unknownCodex = await connect(CHANNEL, "codex");
+  const unknownBridge = await connect(CHANNEL, "bridge");
+  const unknownFailure = event(unknownCodex, "close");
+  unknownBridge.close(4499, "untrusted close detail");
+  const unknownEvent = await unknownFailure;
+  expect(unknownEvent.code).toBe(4404);
+  expect(unknownEvent.reason).toBe("peer unavailable");
+
   cappedPeer.close(1000, "done");
 });
