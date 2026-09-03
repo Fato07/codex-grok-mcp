@@ -56,7 +56,7 @@ The plugin uses `npx` to run only `codex-grok-mcp@0.2.0-beta.1`. It does not mod
 If you do not want the plugin wrapper:
 
 ```bash
-codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-mcp
+codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-mcp
 ```
 
 Start a new Codex task after adding the server, then ask Codex to use `grok_ask`.
@@ -66,7 +66,7 @@ Start a new Codex task after adding the server, then ask Codex to use `grok_ask`
 Run after the local package installation:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-mcp --doctor
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-mcp --doctor
 ```
 
 Doctor checks local prerequisites and configuration without sending a prompt to Grok. It must not print authentication material.
@@ -84,22 +84,22 @@ RELAY_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(
 printf 'RELAY_ACCESS_TOKEN=%s\n' "$RELAY_TOKEN" | npx wrangler deploy --secrets-file /dev/stdin
 
 cd ..
-CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
+CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
 unset RELAY_TOKEN
 ```
 
 The pairing command requires an interactive terminal and prints the credential only there. Keep it private. In **Grok Bot's Computer** terminal—not in a Bot chat—run the exact companion release and paste the code into the no-echo prompt:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-bridge connect
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-bridge connect
 ```
 
 To update an already paired companion, stop the foreground process with `Ctrl-C`, then run the exact package version with `run`; pairing again is unnecessary:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-bridge run
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-bridge run
 ```
 
 Do not run a mutable GitHub default branch inside the credential-bearing VM. Always pin an exact audited package version.
@@ -180,7 +180,7 @@ Passing unit tests is not compatibility proof. A platform becomes supported only
 Run the pinned package doctor directly:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-mcp --doctor
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-mcp --doctor
 ```
 
 ### Grok CLI is missing or not signed in
@@ -233,8 +233,8 @@ codex mcp remove grok
 Remove both pairing files before uninstalling:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-mcp unpair
-npx --yes --package=codex-grok-mcp@0.2.0-beta.1 codex-grok-bridge unpair
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-mcp unpair
+npx --yes --package=codex-grok-mcp@0.2.0-beta.1 -- codex-grok-bridge unpair
 ```
 
 Uninstalling does not change or delete Grok CLI authentication or account data.
