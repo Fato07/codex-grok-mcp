@@ -257,6 +257,7 @@ Uninstalling does not change or delete Grok CLI authentication or account data.
 
 ```bash
 npm ci
+npm ci --prefix relay
 npm run typecheck
 npm run test:all
 ```

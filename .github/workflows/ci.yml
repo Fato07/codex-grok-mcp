@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: [22, 24]
+        node: [20.19.2, 22, 24]
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -27,8 +27,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            relay/package-lock.json
 
       - run: npm ci
+      - run: npm ci --prefix relay
       - run: npm run build
       - run: npm run test:all
       - run: npm audit --omit=dev
