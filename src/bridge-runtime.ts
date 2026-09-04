@@ -347,13 +347,24 @@ function publicStatus(record: LeaseRecord): Exclude<CompanionLeaseStatus, { stat
 export async function inspectCompanionLease(
   configPath: string,
 ): Promise<CompanionLeaseStatus> {
-  try {
-    return publicStatus((await readLease(companionLeasePath(configPath))).record);
-  } catch (caught) {
-    if (isNodeError(caught) && caught.code === "ENOENT") return { state: "stopped" };
-    if (caught instanceof BridgeRuntimeError) throw caught;
-    fail();
+  const path = companionLeasePath(configPath);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return publicStatus((await readLease(path)).record);
+    } catch (caught) {
+      if (isNodeError(caught) && caught.code === "ENOENT") return { state: "stopped" };
+      if (
+        caught instanceof BridgeRuntimeError &&
+        caught.code === "companion_lease_invalid" &&
+        attempt === 0
+      ) {
+        continue;
+      }
+      if (caught instanceof BridgeRuntimeError) throw caught;
+      fail();
+    }
   }
+  fail();
 }
 
 export async function stopManagedCompanion(configPath: string): Promise<void> {

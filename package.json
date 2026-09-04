@@ -1,6 +1,6 @@
 {
   "name": "codex-grok-mcp",
-  "version": "0.2.0-beta.5",
+  "version": "0.2.0-beta.6",
   "description": "Unofficial local MCP bridge from Codex to isolated Grok calls and experimental persistent Grok Bots.",
   "author": "Fato07",
   "repository": {

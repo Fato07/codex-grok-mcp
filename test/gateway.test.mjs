@@ -720,7 +720,7 @@ test("persistent Bot tools are opt-in and partial gateway credentials fail close
       experimental: true,
       state: "not_paired",
       mode: "unpaired",
-      server_version: "0.2.0-beta.5",
+      server_version: "0.2.0-beta.6",
     });
     assert.match(status.content[0].text, /not paired/i);
   } finally {
@@ -781,7 +781,7 @@ test("paired bridge status exposes only allowlisted metadata", async () => {
       experimental: true,
       state: "connected",
       mode: "paired_relay",
-      server_version: "0.2.0-beta.5",
+      server_version: "0.2.0-beta.6",
       companion_version: "0.2.0-beta.5",
       supported_protocol_versions: [1, 2, 3],
       capabilities: ["status", "list_bots", "read_bot", "send_message"],
@@ -875,7 +875,7 @@ test("configured gateway exposes roster and exact-ID send with an acceptance rec
       experimental: true,
       state: "configured",
       mode: "legacy_direct",
-      server_version: "0.2.0-beta.5",
+      server_version: "0.2.0-beta.6",
     });
     assert.equal(gateway.requests.length, 0);
 

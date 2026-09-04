@@ -154,6 +154,9 @@ test("companion lease fails closed for malformed, symlinked, and wrong-mode lock
     await assert.rejects(CompanionLease.acquire(configPath), {
       message: "companion_lease_invalid",
     });
+    await assert.rejects(inspectCompanionLease(configPath), {
+      message: "companion_lease_invalid",
+    });
     assert.equal((await lstat(lockPath)).isSymbolicLink(), kind === "symlink");
   }
 });

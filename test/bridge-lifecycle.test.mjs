@@ -327,9 +327,14 @@ async function createFixtureRelease(root, version, byte) {
   await chmod(directory, 0o700);
   await cp(join(process.cwd(), "dist"), join(packageDirectory, "dist"), { recursive: true });
   const versionPath = join(packageDirectory, "dist", "version.js");
+  const versionSource = await readFile(versionPath, "utf8");
+  assert.match(versionSource, /export const CODEX_GROK_VERSION = "[^"]+";/);
   await writeFile(
     versionPath,
-    (await readFile(versionPath, "utf8")).replace("0.2.0-beta.5", version),
+    versionSource.replace(
+      /export const CODEX_GROK_VERSION = "[^"]+";/,
+      `export const CODEX_GROK_VERSION = ${JSON.stringify(version)};`,
+    ),
     { mode: 0o644 },
   );
   const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));

@@ -236,7 +236,7 @@ test("managed candidate preflight returns versions only", async (context) => {
   assert.equal(stderr, "");
   assert.deepEqual(JSON.parse(stdout), {
     ok: true,
-    version: "0.2.0-beta.5",
+    version: "0.2.0-beta.6",
     protocol_versions: [1, 2, 3],
   });
   assert(!stdout.includes("private-bot-id"));
@@ -286,7 +286,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
   );
 
   assert.deepEqual(result.result, {
-    companion_version: "0.2.0-beta.5",
+    companion_version: "0.2.0-beta.6",
     supported_protocol_versions: [1, 2, 3],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,

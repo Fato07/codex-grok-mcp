@@ -44,7 +44,7 @@ body:
     attributes:
       label: Environment
       description: Include connector, OS, architecture, Node, Codex, and Grok CLI versions.
-      placeholder: codex-grok-mcp 0.2.0-beta.5; macOS arm64; Node 22; Codex ...; Grok CLI ...
+      placeholder: codex-grok-mcp 0.2.0-beta.6; macOS arm64; Node 22; Codex ...; Grok CLI ...
     validations:
       required: true
 
