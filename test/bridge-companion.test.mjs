@@ -152,6 +152,98 @@ test("probe names a symlinked SAND_DATA_ROOT without leaking paths", async (cont
   assert(!stderr.includes(sandbox));
 });
 
+test("companion routes the bounded lifecycle surface without touching pairing", async () => {
+  const commands = [
+    "install",
+    "start",
+    "status",
+    "stop",
+    "restart",
+    "update",
+    "rollback",
+    "ensure",
+  ];
+  const calls = [];
+  for (const command of commands) {
+    let stdout = "";
+    let stderr = "";
+    const exitCode = await runBridgeCompanion([command], {
+      lifecycle: {
+        run: async (received) => {
+          calls.push(received);
+          return {
+            command: received,
+            state: "running",
+            changed: received !== "status",
+            active_version: "0.2.0-beta.5",
+            previous_version: null,
+            protocol_versions: [1, 2, 3],
+            pairing_valid: true,
+          };
+        },
+      },
+      stdout: { write: (chunk) => (stdout += chunk) },
+      stderr: { write: (chunk) => (stderr += chunk) },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(stderr, "");
+    assert.deepEqual(JSON.parse(stdout), {
+      command,
+      state: "running",
+      changed: command !== "status",
+      active_version: "0.2.0-beta.5",
+      previous_version: null,
+      protocol_versions: [1, 2, 3],
+      pairing_valid: true,
+    });
+  }
+  assert.deepEqual(calls, commands);
+
+  let stderr = "";
+  assert.equal(
+    await runBridgeCompanion(["update", "beta"], {
+      stderr: { write: (chunk) => (stderr += chunk) },
+    }),
+    2,
+  );
+  assert.equal(stderr, '{"error":"unsupported_command"}\n');
+});
+
+test("managed candidate preflight returns versions only", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-managed-preflight-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  await savePairingConfig(
+    parsePairCode(generatePairCode("wss://relay.example.test/v1/connect")),
+    configPath,
+  );
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await runBridgeCompanion(["_managed-preflight"], {
+    environment: { CODEX_GROK_MANAGED_CONFIG_PATH: configPath },
+    createClient: () => ({
+      discovery: () => ({ port: 1340, pid: 1234, hasToken: true }),
+      health: async () => ({ ok: true, isBusy: false }),
+      listAgents: async () => [
+        { id: "private-bot-id", name: "Private Bot", isGroup: false },
+      ],
+    }),
+    stdout: { write: (chunk) => (stdout += chunk) },
+    stderr: { write: (chunk) => (stderr += chunk) },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(stderr, "");
+  assert.deepEqual(JSON.parse(stdout), {
+    ok: true,
+    version: "0.2.0-beta.5",
+    protocol_versions: [1, 2, 3],
+  });
+  assert(!stdout.includes("private-bot-id"));
+  assert(!stdout.includes("Private Bot"));
+  assert(!stdout.includes(configPath));
+});
+
 test("status handshake returns only allowlisted companion and gateway metadata", async () => {
   const secrets = [
     "bot-secret-id",
@@ -323,7 +415,7 @@ test("companion replays the authenticated receipt without sending twice", async 
   }
 });
 
-test("an in-flight gateway send blocks a second send after relay reconnect", async () => {
+test("an in-flight gateway send blocks reconnect and drains on shutdown", async () => {
   const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-replay-"));
   const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(relay, "listening");
@@ -393,6 +485,13 @@ test("an in-flight gateway send blocks a second send after relay reconnect", asy
     assert.equal(result.error.code, "UNAVAILABLE");
     assert.equal(result.error.delivery_may_have_occurred, false);
     assert.equal(sends.length, 1);
+
+    controller.abort();
+    const shutdownState = await Promise.race([
+      bridge.then(() => "returned"),
+      new Promise((resolve) => setImmediate(() => resolve("draining"))),
+    ]);
+    assert.equal(shutdownState, "draining");
   } finally {
     releaseSend?.({ accepted: true });
     controller.abort();

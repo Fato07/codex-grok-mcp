@@ -167,6 +167,45 @@ npx --yes --prefer-online --package=codex-grok-mcp@beta -- codex-grok-bridge run
 
 This mutable command never edits pairing state or updates a running process. Prefer exact versions for audited or unattended environments. Roll back by stopping the companion and running a previously verified version.
 
+### Managed lifecycle candidate
+
+The repository now includes managed lifecycle commands for the next prerelease. The published `0.2.0-beta.5` package remains foreground-only until that prerelease passes the live VM gate.
+
+After pairing, stop the old foreground companion once. Then install and start an exact lifecycle-capable release:
+
+```bash
+VERSION=<exact-version>
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
+```
+
+`status`, `start`, `stop`, and `ensure` are idempotent. `restart` intentionally performs a fresh cycle:
+
+```bash
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge status
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge start
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge stop
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge restart
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge ensure
+```
+
+An exact update stages and checks the replacement before the healthy process stops. The prior exact release stays available for one retry-safe rollback:
+
+```bash
+NEXT_VERSION=<new-exact-version>
+npx --yes --package "codex-grok-mcp@${NEXT_VERSION}" -- codex-grok-bridge update
+npx --yes --package "codex-grok-mcp@${NEXT_VERSION}" -- codex-grok-bridge rollback
+```
+
+The rollback operation uses the retained release, and a repeated rollback is a no-op. Pairing is read and revalidated, never rewritten. For VM resume recovery, a Grok Bot routine may run the exact pinned `ensure` command. Routine creation remains an explicit operator action.
+
+To opt into the mutable beta channel for one update, make the channel visible in that command:
+
+```bash
+npx --yes --prefer-online --package=codex-grok-mcp@beta -- codex-grok-bridge update
+```
+
+The resolved release is stored as an exact version. Later `start`, `restart`, `ensure`, and `rollback` operations do not resolve a mutable channel.
+
 ## Collaborating safely with persistent Bots
 
 1. Call `grok_bridge_status`, then use `grok_list_bots` to choose one exact Bot ID.
@@ -194,7 +233,7 @@ The plugin passes only these connector options. Pairing is stored in a private m
 - **CLI missing or signed out:** run `grok --version`, `grok models`, and the pinned doctor command. Complete normal Grok login outside Codex.
 - **`UPGRADE_REQUIRED`:** stop and restart the VM companion with the same package version as the connector.
 - **`DATA_ROOT_SYMLINK`:** set `SAND_DATA_ROOT` to the real Grok Bot data directory, not a symlink. The companion rejects symlinked descriptor parents.
-- **`companion_lease_stale`:** verify the recorded PID is no longer running before removing only the adjacent `bridge.json.lock`. Automatic stale-lock removal is intentionally disabled.
+- **`companion_lease_stale`:** a lifecycle-capable managed install can run the exact pinned `ensure` command, which clears only a revalidated dead managed lease. For a foreground install, verify the recorded PID is gone before removing only the adjacent `bridge.json.lock`.
 - **Uncertain send:** inspect the Bot before considering any new action. A retry may duplicate a message.
 
 When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, and connector versions. Never attach authentication files, pairing codes, gateway/relay tokens, prompts, responses, transcripts, or private paths.

@@ -2,6 +2,18 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Managed VM companion commands for exact-version install, start, status, stop, ensure, restart, update, and retry-safe rollback.
+- A private current/previous release store with candidate preflight, detached-process readiness, exact process identity, and bounded stale-lease recovery.
+
+### Changed
+
+- Drain an in-flight Bot request before a companion shutdown can release its lease.
+- Revalidate the pairing file identity across lifecycle cutover without rewriting or printing it.
+
 ## [0.2.0-beta.5] - 2026-09-03
 
 ### Added

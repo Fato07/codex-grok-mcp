@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
+import { chmod, lstat, open, rename, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   LocalGatewayError,
@@ -32,6 +34,12 @@ import {
   type PairingConfig,
 } from "./bridge-pairing.js";
 import { PersistentReplayGuard } from "./bridge-replay.js";
+import {
+  BridgeLifecycle,
+  BridgeLifecycleError,
+  type LifecycleCommand,
+  type LifecycleResult,
+} from "./bridge-lifecycle.js";
 import { BridgeRuntimeError, CompanionLease } from "./bridge-runtime.js";
 import {
   BRIDGE_CAPABILITIES,
@@ -97,6 +105,8 @@ type Writer = { write(chunk: string): unknown };
 
 type CliDependencies = {
   createClient?: () => BridgeClient;
+  environment?: NodeJS.ProcessEnv;
+  lifecycle?: { run(command: LifecycleCommand): Promise<LifecycleResult> };
   readPairCode?: () => Promise<string>;
   runBridge?: (config: PairingConfig, client: BridgeClient) => Promise<void>;
   configPath?: string;
@@ -302,6 +312,7 @@ type RecentRequest = {
 };
 
 type BridgeRuntimeState = {
+  activeHandlers: Set<Promise<void>>;
   busy: boolean;
   recentRequests: Map<string, RecentRequest>;
   replayGuard: PersistentReplayGuard;
@@ -336,7 +347,8 @@ async function connectOnce(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     socket.on("message", (data, isBinary) => {
-      void (async () => {
+      if (settled || signal?.aborted) return;
+      const handler = (async () => {
         let request: BridgeRequest;
         try {
           const plaintext = decryptFrame(config, "codex", textFrame(data, isBinary));
@@ -422,6 +434,14 @@ async function connectOnce(
           finish();
         }
       })();
+      state.activeHandlers.add(handler);
+      void handler.then(
+        () => state.activeHandlers.delete(handler),
+        () => {
+          state.activeHandlers.delete(handler);
+          finish();
+        },
+      );
     });
     socket.once("close", finish);
     socket.once("error", finish);
@@ -449,9 +469,11 @@ export async function runBridge(
   client: BridgeClient = createBridgeProbeClient(),
   signal?: AbortSignal,
   replayRoot?: string,
+  onReady?: () => Promise<void>,
 ): Promise<void> {
   let attempt = 0;
   const state: BridgeRuntimeState = {
+    activeHandlers: new Set(),
     busy: false,
     recentRequests: new Map(),
     replayGuard: await PersistentReplayGuard.open(
@@ -460,12 +482,17 @@ export async function runBridge(
       replayRoot,
     ),
   };
-  while (!signal?.aborted) {
-    await connectOnce(config, client, state, signal);
-    if (signal?.aborted) break;
-    const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
-    await waitForReconnect(delay ?? 15_000, signal);
-    attempt += 1;
+  await onReady?.();
+  try {
+    while (!signal?.aborted) {
+      await connectOnce(config, client, state, signal);
+      if (signal?.aborted) break;
+      const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+      await waitForReconnect(delay ?? 15_000, signal);
+      attempt += 1;
+    }
+  } finally {
+    await Promise.allSettled(state.activeHandlers);
   }
 }
 
@@ -526,16 +553,145 @@ async function readPairCode(): Promise<string> {
   });
 }
 
-async function runUntilSignal(config: PairingConfig, client: BridgeClient): Promise<void> {
+async function runUntilSignal(
+  config: PairingConfig,
+  client: BridgeClient,
+  onReady?: () => Promise<void>,
+): Promise<void> {
   const controller = new AbortController();
   const stop = (): void => controller.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
-    await runBridge(config, client, controller.signal);
+    await runBridge(config, client, controller.signal, undefined, onReady);
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+  }
+}
+
+type ManagedEnvironment = {
+  configPath: string;
+  integrity: string;
+  readyNonce: string;
+  readyPath: string;
+};
+
+function managedEnvironment(environment: NodeJS.ProcessEnv): ManagedEnvironment {
+  const configPath = environment.CODEX_GROK_MANAGED_CONFIG_PATH;
+  const integrity = environment.CODEX_GROK_MANAGED_INTEGRITY;
+  const readyNonce = environment.CODEX_GROK_MANAGED_READY_NONCE;
+  const readyPath = environment.CODEX_GROK_MANAGED_READY_PATH;
+  if (
+    configPath === undefined ||
+    readyPath === undefined ||
+    !isAbsolute(configPath) ||
+    !isAbsolute(readyPath) ||
+    /[\u0000-\u001f\u007f]/.test(configPath) ||
+    /[\u0000-\u001f\u007f]/.test(readyPath) ||
+    integrity === undefined ||
+    !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity) ||
+    readyNonce === undefined ||
+    !/^[A-Za-z0-9_-]{43}$/.test(readyNonce) ||
+    Buffer.from(readyNonce, "base64url").length !== 32
+  ) {
+    throw new Error("invalid_managed_environment");
+  }
+  return {
+    configPath: resolve(configPath),
+    integrity,
+    readyNonce,
+    readyPath: resolve(readyPath),
+  };
+}
+
+function currentUid(): number {
+  if (typeof process.getuid !== "function") throw new Error("managed_linux_required");
+  return process.getuid();
+}
+
+async function writeManagedReady(path: string, nonce: string): Promise<void> {
+  const parent = dirname(path);
+  const parentDetails = await lstat(parent);
+  if (
+    parentDetails.isSymbolicLink() ||
+    !parentDetails.isDirectory() ||
+    parentDetails.uid !== currentUid() ||
+    (parentDetails.mode & 0o7777) !== 0o700
+  ) {
+    throw new Error("invalid_ready_directory");
+  }
+  const temporaryPath = join(parent, `.ready-${process.pid}.tmp`);
+  let handle;
+  try {
+    handle = await open(
+      temporaryPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(
+      `${JSON.stringify({
+        ok: true,
+        version: CODEX_GROK_VERSION,
+        protocol_versions: [...BRIDGE_PROTOCOL_VERSIONS],
+        nonce,
+      })}\n`,
+      "utf8",
+    );
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, path);
+  } catch (caught) {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    throw caught;
+  }
+}
+
+async function runManagedPreflight(
+  environment: NodeJS.ProcessEnv,
+  createClient: () => BridgeClient,
+  stdout: Writer,
+): Promise<number> {
+  const configPath = environment.CODEX_GROK_MANAGED_CONFIG_PATH;
+  if (configPath === undefined || !isAbsolute(configPath)) {
+    throw new Error("invalid_managed_environment");
+  }
+  await loadPairingConfig(configPath);
+  await probeBridge(createClient());
+  stdout.write(
+    `${JSON.stringify({
+      ok: true,
+      version: CODEX_GROK_VERSION,
+      protocol_versions: [...BRIDGE_PROTOCOL_VERSIONS],
+    })}\n`,
+  );
+  return 0;
+}
+
+async function runManagedWorker(
+  environment: NodeJS.ProcessEnv,
+  createClient: () => BridgeClient,
+): Promise<number> {
+  const managed = managedEnvironment(environment);
+  const config = await loadPairingConfig(managed.configPath);
+  const client = createClient();
+  await probeBridge(client);
+  const lease = await CompanionLease.acquire(managed.configPath, {
+    companionVersion: CODEX_GROK_VERSION,
+    launchToken: managed.readyNonce,
+    protocolVersions: BRIDGE_PROTOCOL_VERSIONS,
+    releaseIntegrity: managed.integrity,
+  });
+  try {
+    await runUntilSignal(config, client, () =>
+      writeManagedReady(managed.readyPath, managed.readyNonce),
+    );
+    return 0;
+  } finally {
+    await lease.release();
   }
 }
 
@@ -545,22 +701,57 @@ export async function runBridgeCompanion(
 ): Promise<number> {
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
+  const environment = dependencies.environment ?? process.env;
   const command = argv[0];
   const force = argv.length === 2 && argv[1] === "--force";
+  const lifecycleCommands: LifecycleCommand[] = [
+    "install",
+    "start",
+    "status",
+    "stop",
+    "restart",
+    "update",
+    "rollback",
+    "ensure",
+  ];
+  const internalCommands = ["_managed-preflight", "_managed-run"];
   const validArgs = argv.length === 1 || (command === "connect" && force);
-  if (!validArgs || !["probe", "connect", "run", "unpair"].includes(command ?? "")) {
+  if (
+    !validArgs ||
+    ![
+      "probe",
+      "connect",
+      "run",
+      "unpair",
+      ...lifecycleCommands,
+      ...internalCommands,
+    ].includes(command ?? "")
+  ) {
     stderr.write(`${JSON.stringify({ error: "unsupported_command" })}\n`);
     return 2;
   }
 
   try {
     const createClient = dependencies.createClient ?? createBridgeProbeClient;
+    if (command === "_managed-preflight") {
+      return await runManagedPreflight(environment, createClient, stdout);
+    }
+    if (command === "_managed-run") {
+      return await runManagedWorker(environment, createClient);
+    }
     if (command === "probe") {
       const result = await probeBridge(createClient());
       stdout.write(`${JSON.stringify(result)}\n`);
       return 0;
     }
     const configPath = dependencies.configPath ?? defaultBridgeConfigPath();
+    if (lifecycleCommands.includes(command as LifecycleCommand)) {
+      const lifecycle =
+        dependencies.lifecycle ?? new BridgeLifecycle({ configPath });
+      const result = await lifecycle.run(command as LifecycleCommand);
+      stdout.write(`${JSON.stringify(result)}\n`);
+      return 0;
+    }
     const lease = await CompanionLease.acquire(configPath);
     try {
       if (command === "unpair") {
@@ -584,7 +775,9 @@ export async function runBridgeCompanion(
     }
   } catch (caught) {
     const error =
-      caught instanceof BridgeRuntimeError
+      caught instanceof BridgeLifecycleError
+        ? caught.code
+        : caught instanceof BridgeRuntimeError
         ? caught.code
         : caught instanceof LocalGatewayError
           ? caught.code
