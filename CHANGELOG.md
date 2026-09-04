@@ -2,6 +2,12 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.7] - 2026-09-04
+
+### Changed
+
+- Separate deterministic pull-request and `main` CI from explicitly dispatched or tagged dependency audits, which remain bounded and fail closed.
+
 ## [0.2.0-beta.6] - 2026-09-04
 
 ### Added

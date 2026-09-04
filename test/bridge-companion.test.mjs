@@ -19,6 +19,7 @@ import {
   savePairingConfig,
 } from "../dist/bridge-pairing.js";
 import { PersistentReplayGuard } from "../dist/bridge-replay.js";
+import { CODEX_GROK_VERSION } from "../dist/version.js";
 import {
   LocalGatewayError,
   LocalGrokBotClient,
@@ -236,7 +237,7 @@ test("managed candidate preflight returns versions only", async (context) => {
   assert.equal(stderr, "");
   assert.deepEqual(JSON.parse(stdout), {
     ok: true,
-    version: "0.2.0-beta.6",
+    version: CODEX_GROK_VERSION,
     protocol_versions: [1, 2, 3],
   });
   assert(!stdout.includes("private-bot-id"));
@@ -286,7 +287,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
   );
 
   assert.deepEqual(result.result, {
-    companion_version: "0.2.0-beta.6",
+    companion_version: CODEX_GROK_VERSION,
     supported_protocol_versions: [1, 2, 3],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,
