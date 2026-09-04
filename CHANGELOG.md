@@ -14,6 +14,10 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - Drain an in-flight Bot request before a companion shutdown can release its lease.
 - Revalidate the pairing file identity across lifecycle cutover without rewriting or printing it.
 
+### Fixed
+
+- Prevent a clean managed shutdown from being misreported as an invalid lease when the lease disappears between filesystem checks.
+
 ## [0.2.0-beta.5] - 2026-09-03
 
 ### Added
