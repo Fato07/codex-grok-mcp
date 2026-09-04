@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     tags: ["v*"]
@@ -38,8 +39,8 @@ jobs:
       - run: npm run test:all
 
       - name: Audit dependencies
-        # Node 22 bundles npm 10, whose quick-audit endpoint is retired.
-        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        # Release-only: Node 24/npm 11 uses the supported endpoint while ordinary CI stays deterministic.
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24 && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
         run: |
           audit_with_retry() {
             npm audit "$@" --fetch-retries=0 --fetch-timeout=180000 || {
