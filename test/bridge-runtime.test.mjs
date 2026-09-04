@@ -207,7 +207,6 @@ test("lifecycle control never signals an unmanaged companion", async (context) =
 test("managed stop verifies Linux process identity and waits for owner release", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
   const root = await mkdtemp(join(tmpdir(), "codex-grok-runtime-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
   const configPath = join(root, "private", "bridge.json");
   const integrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
   const moduleUrl = new URL("../dist/bridge-runtime.js", import.meta.url).href;
@@ -229,8 +228,11 @@ test("managed stop verifies Linux process identity and waits for owner release",
   const child = spawn(process.execPath, ["--input-type=module", "-e", source, configPath, integrity], {
     stdio: ["ignore", "pipe", "ignore"],
   });
-  context.after(() => {
+  const exited = once(child, "exit");
+  context.after(async () => {
     if (child.exitCode === null) child.kill("SIGKILL");
+    await exited.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
   });
   await once(child.stdout, "data");
 
@@ -243,7 +245,7 @@ test("managed stop verifies Linux process identity and waits for owner release",
   });
   await stopManagedCompanion(configPath);
   await waitForCompanionStop(configPath, 5_000);
-  const [code, signal] = await once(child, "exit");
+  const [code, signal] = await exited;
   assert.equal(code, 0);
   assert.equal(signal, null);
   assert.deepEqual(await inspectCompanionLease(configPath), { state: "stopped" });
