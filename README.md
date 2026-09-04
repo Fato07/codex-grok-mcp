@@ -240,7 +240,12 @@ When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, 
 
 ## Uninstall
 
-1. Stop the foreground companion.
+1. Stop the VM companion. Press `Ctrl-C` for a foreground process. For a managed beta.6 install, run:
+
+   ```bash
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.6 -- codex-grok-bridge stop
+   ```
+
 2. In the VM terminal, remove its pairing:
 
    ```bash
