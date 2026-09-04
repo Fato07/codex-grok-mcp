@@ -1,6 +1,6 @@
 {
   "name": "codex-grok-mcp",
-  "version": "0.2.0-beta.5+codex.20260903204114",
+  "version": "0.2.0-beta.6+codex.20260904011857",
   "description": "Unofficial local bridge for isolated Grok calls and paired persistent Grok Bots.",
   "author": {
     "name": "Fato07"
