@@ -38,7 +38,8 @@ jobs:
       - run: npm run test:all
 
       - name: Audit dependencies
-        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        # Node 22 bundles npm 10, whose quick-audit endpoint is retired.
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: |
           npm audit --omit=dev
           npm audit --prefix relay
