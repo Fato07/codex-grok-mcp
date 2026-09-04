@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import {
   chmod,
   link,
@@ -30,6 +30,11 @@ export type PairingConfig = {
   relayToken: string;
   channel: string;
   key: string;
+};
+
+export type PairingConfigSnapshot = {
+  config: PairingConfig;
+  identity: Buffer;
 };
 
 type PairCodePayload = {
@@ -391,30 +396,85 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
-export async function loadPairingConfig(path = defaultBridgeConfigPath()): Promise<PairingConfig> {
+function isPrivateConfigFile(details: Stats, uid: number): boolean {
+  return (
+    details.isFile() &&
+    (details.mode & 0o7777) === 0o600 &&
+    details.uid === uid &&
+    details.nlink === 1 &&
+    details.size <= MAX_CONFIG_BYTES
+  );
+}
+
+export async function loadPairingConfigSnapshot(
+  path = defaultBridgeConfigPath(),
+): Promise<PairingConfigSnapshot> {
   try {
+    if (typeof process.getuid !== "function") fail("invalid_config_file");
+    const uid = process.getuid();
     const pathDetails = await lstat(path);
-    if (pathDetails.isSymbolicLink()) fail("invalid_config_file");
+    if (pathDetails.isSymbolicLink() || !isPrivateConfigFile(pathDetails, uid)) {
+      fail("invalid_config_file");
+    }
     const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
     const handle = await open(path, fsConstants.O_RDONLY | noFollow);
     let contents: string;
+    let stableDetails: Stats;
     try {
       const details = await handle.stat();
-      if (!details.isFile() || (details.mode & 0o777) !== 0o600 || details.size > MAX_CONFIG_BYTES) {
+      if (
+        details.dev !== pathDetails.dev ||
+        details.ino !== pathDetails.ino ||
+        !isPrivateConfigFile(details, uid)
+      ) {
         fail("invalid_config_file");
       }
       contents = await handle.readFile({ encoding: "utf8" });
+      stableDetails = await handle.stat();
+      if (
+        stableDetails.dev !== details.dev ||
+        stableDetails.ino !== details.ino ||
+        stableDetails.size !== details.size ||
+        stableDetails.mtimeMs !== details.mtimeMs ||
+        stableDetails.ctimeMs !== details.ctimeMs ||
+        !isPrivateConfigFile(stableDetails, uid)
+      ) {
+        fail("invalid_config_file");
+      }
     } finally {
       await handle.close();
     }
     if (Buffer.byteLength(contents, "utf8") > MAX_CONFIG_BYTES || hasUnsafeControlCharacters(contents.trimEnd())) {
       fail("invalid_config_file");
     }
-    return normalizeConfig(JSON.parse(contents), "invalid_config_file");
+    return {
+      config: normalizeConfig(JSON.parse(contents), "invalid_config_file"),
+      identity: Buffer.concat([
+        Buffer.from(
+          JSON.stringify({
+            dev: pathDetails.dev,
+            ino: pathDetails.ino,
+            mode: stableDetails.mode,
+            uid: stableDetails.uid,
+            nlink: stableDetails.nlink,
+            size: stableDetails.size,
+            mtime_ms: stableDetails.mtimeMs,
+            ctime_ms: stableDetails.ctimeMs,
+          }),
+          "utf8",
+        ),
+        Buffer.from([0]),
+        Buffer.from(contents, "utf8"),
+      ]),
+    };
   } catch (error) {
     if (error instanceof BridgePairingError) throw error;
     fail("config_load_failed");
   }
+}
+
+export async function loadPairingConfig(path = defaultBridgeConfigPath()): Promise<PairingConfig> {
+  return (await loadPairingConfigSnapshot(path)).config;
 }
 
 export async function loadOptionalPairingConfig(

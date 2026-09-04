@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, link, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,6 +10,7 @@ import {
   generatePairCode,
   generateRelayAccessToken,
   loadPairingConfig,
+  loadPairingConfigSnapshot,
   parsePairCode,
   removePairingConfig,
   savePairingConfig,
@@ -105,6 +106,7 @@ test("config persistence is private, atomic, and refuses accidental overwrite", 
   const second = parsePairCode(generatePairCode("wss://relay.example.test/socket"));
 
   await savePairingConfig(first, path);
+  const firstSnapshot = await loadPairingConfigSnapshot(path);
   assert.equal((await stat(join(root, "private"))).mode & 0o777, 0o700);
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await loadPairingConfig(path), first);
@@ -113,9 +115,38 @@ test("config persistence is private, atomic, and refuses accidental overwrite", 
   assert.deepEqual(await loadPairingConfig(path), first);
   await savePairingConfig(second, path, { overwrite: true });
   assert.deepEqual(await loadPairingConfig(path), second);
+  const secondSnapshot = await loadPairingConfigSnapshot(path);
+  assert.deepEqual(firstSnapshot.config, first);
+  assert.deepEqual(secondSnapshot.config, second);
+  assert.notDeepEqual(firstSnapshot.identity, secondSnapshot.identity);
 
   await chmod(path, 0o644);
   await assert.rejects(loadPairingConfig(path), { message: "invalid_config_file" });
   assert.equal(await removePairingConfig(path), true);
   assert.equal(await removePairingConfig(path), false);
+});
+
+test("config loading rejects unsafe file identities and oversized files", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-pairing-identity-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const config = parsePairCode(generatePairCode("wss://relay.example.test/socket"));
+  const path = join(root, "bridge.json");
+
+  await savePairingConfig(config, path);
+  const details = await stat(path);
+  assert.equal(details.uid, process.getuid());
+  assert.deepEqual(await loadPairingConfig(path), config);
+
+  const hardLinkPath = join(root, "bridge-hard-link.json");
+  await link(path, hardLinkPath);
+  await assert.rejects(loadPairingConfig(path), { message: "invalid_config_file" });
+  await assert.rejects(loadPairingConfig(hardLinkPath), { message: "invalid_config_file" });
+
+  const symbolicLinkPath = join(root, "bridge-symbolic-link.json");
+  await symlink(path, symbolicLinkPath);
+  await assert.rejects(loadPairingConfig(symbolicLinkPath), { message: "invalid_config_file" });
+
+  const oversizedPath = join(root, "bridge-oversized.json");
+  await writeFile(oversizedPath, Buffer.alloc(8 * 1024 + 1), { mode: 0o600 });
+  await assert.rejects(loadPairingConfig(oversizedPath), { message: "invalid_config_file" });
 });
