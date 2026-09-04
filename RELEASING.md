@@ -52,6 +52,8 @@ The stable claim is limited to the rows proven below. For `v0.2.0`, the host sco
 
 Run from the clean candidate checkout and link the candidate-specific CI run or redacted log.
 
+Ordinary pull-request and `main` CI stays deterministic and does not call npm's network-dependent audit service. Before tagging, manually dispatch the CI workflow against the exact candidate ref; audits run fail-closed on its Node 24 Ubuntu job. `v*` tag runs execute the same audit gate again.
+
 - [ ] `npm ci` and `npm ci --prefix relay` complete from the committed lockfiles.
 - [ ] `npm run test:all` passes. This includes the root build and core tests plus relay type checks and tests.
 - [ ] `npm audit --omit=dev` passes.
