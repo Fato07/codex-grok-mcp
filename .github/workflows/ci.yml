@@ -41,8 +41,14 @@ jobs:
         # Node 22 bundles npm 10, whose quick-audit endpoint is retired.
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: |
-          npm audit --omit=dev
-          npm audit --prefix relay
+          audit_with_retry() {
+            npm audit "$@" --fetch-retries=0 --fetch-timeout=180000 || {
+              sleep 5
+              npm audit "$@" --fetch-retries=0 --fetch-timeout=180000
+            }
+          }
+          audit_with_retry --omit=dev
+          audit_with_retry --prefix relay
 
       - name: Inspect package contents
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22
