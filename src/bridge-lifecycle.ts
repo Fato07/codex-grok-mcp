@@ -14,7 +14,8 @@ import {
   unlink,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   defaultBridgeConfigPath,
   loadPairingConfigSnapshot,
@@ -42,6 +43,7 @@ const PROCESS_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 15_000;
 const STOP_TIMEOUT_MS = 15_000;
 const PACKAGE_NAME = "codex-grok-mcp";
+const CURRENT_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export type LifecycleCommand =
   | "install"
@@ -481,8 +483,42 @@ function npmCommand(args: string[]): { command: string; args: string[] } {
   return { command: "npm", args };
 }
 
+type PackedLifecyclePackage = {
+  filename: string;
+  integrity: string;
+};
+
+function parsePackedLifecyclePackage(value: string): PackedLifecyclePackage {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    fail("install_failed");
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 1) fail("install_failed");
+  const record = parsed[0];
+  if (
+    typeof record !== "object" ||
+    record === null ||
+    Array.isArray(record) ||
+    (record as Record<string, unknown>).name !== PACKAGE_NAME ||
+    (record as Record<string, unknown>).version !== CODEX_GROK_VERSION ||
+    typeof (record as Record<string, unknown>).filename !== "string" ||
+    basename((record as Record<string, unknown>).filename as string) !==
+      (record as Record<string, unknown>).filename ||
+    integrityDigest((record as Record<string, unknown>).integrity) === undefined
+  ) {
+    fail("install_failed");
+  }
+  return {
+    filename: (record as Record<string, unknown>).filename as string,
+    integrity: (record as Record<string, unknown>).integrity as string,
+  };
+}
+
 export async function stageLifecycleRelease(
   root: string,
+  packageRoot = CURRENT_PACKAGE_ROOT,
 ): Promise<LifecycleRelease> {
   await ensurePrivateDirectory(root);
   const releasesRoot = join(root, "releases");
@@ -490,6 +526,33 @@ export async function stageLifecycleRelease(
   const staging = await mkdtemp(join(root, ".stage-"));
   await chmod(staging, 0o700);
   try {
+    const packageMetadata = await readRegularJson(
+      join(packageRoot, "package.json"),
+      MAX_PACKAGE_JSON_BYTES,
+    );
+    if (
+      typeof packageMetadata !== "object" ||
+      packageMetadata === null ||
+      Array.isArray(packageMetadata) ||
+      (packageMetadata as Record<string, unknown>).name !== PACKAGE_NAME ||
+      (packageMetadata as Record<string, unknown>).version !== CODEX_GROK_VERSION
+    ) {
+      fail("install_failed");
+    }
+    const packedRoot = join(staging, ".candidate");
+    await ensurePrivateDirectory(packedRoot);
+    const pack = npmCommand([
+      "pack",
+      "--json",
+      "--ignore-scripts",
+      "--pack-destination",
+      packedRoot,
+      packageRoot,
+    ]);
+    const packed = parsePackedLifecyclePackage(
+      (await runProcess(pack.command, pack.args, { cwd: staging })).stdout,
+    );
+    const packedPath = join(packedRoot, packed.filename);
     const packageJsonPath = join(staging, "package.json");
     await writePrivateJson(packageJsonPath, {
       name: "codex-grok-mcp-managed-companion",
@@ -502,7 +565,7 @@ export async function stageLifecycleRelease(
       "--no-audit",
       "--no-fund",
       "--save-exact",
-      `${PACKAGE_NAME}@${CODEX_GROK_VERSION}`,
+      packedPath,
     ]);
     await runProcess(install.command, install.args, { cwd: staging });
     const installedPackage = await readRegularJson(
@@ -532,16 +595,17 @@ export async function stageLifecycleRelease(
       installedLock === null ||
       Array.isArray(installedLock) ||
       (installedLock as Record<string, unknown>).version !== CODEX_GROK_VERSION ||
-      integrityDigest((installedLock as Record<string, unknown>).integrity) === undefined
+      (installedLock as Record<string, unknown>).integrity !== packed.integrity
     ) {
       fail("install_failed");
     }
     const release: LifecycleRelease = {
       version: CODEX_GROK_VERSION,
-      integrity: (installedLock as Record<string, unknown>).integrity as string,
+      integrity: packed.integrity,
       protocol_versions: [...BRIDGE_PROTOCOL_VERSIONS],
     };
     await writePrivateJson(join(staging, "release.json"), release);
+    await rm(packedRoot, { recursive: true, force: true });
     const versionRoot = join(releasesRoot, release.version);
     await ensurePrivateDirectory(versionRoot);
     const destination = releaseDirectory(root, release);

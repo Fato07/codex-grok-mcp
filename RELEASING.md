@@ -23,7 +23,7 @@ Record one immutable identity before testing:
 - [ ] The checkout is clean and `HEAD` equals the recorded candidate commit.
 - [ ] Package metadata, lockfiles, source version, plugin metadata, launcher pin, public documentation, packed manifest, and intended tag all identify `0.2.0`.
 - [ ] The packed artifact was built from the recorded commit outside the checkout and matches the recorded SHA-512.
-- [ ] Every live candidate install uses that artifact and verifies its SHA-512 first. No command uses `@beta`, `@latest`, or an unpinned branch.
+- [ ] Every live candidate install verifies that artifact's SHA-512 first, then invokes the local tarball directly. The managed lifecycle must report the same package version after staging the currently invoked bytes. No command uses `@beta`, `@latest`, or an unpinned branch.
 
 ## Required dependencies
 
@@ -69,6 +69,7 @@ Use accounts and data the maintainer is authorized to use. Store only redacted r
 
 ### Clean candidate flow
 
+- [ ] Copy the recorded tarball to each authorized test environment without renaming or rebuilding it, verify its SHA-512 locally, and invoke it with `npx --yes --package=/absolute/path/to/codex-grok-mcp-0.2.0.tgz -- <command>`.
 - [ ] On a clean host, install the exact candidate, start a fresh Codex task, discover the tools, run doctor, and complete one isolated `grok_ask` call.
 - [ ] On a clean host and VM, create a new pairing without exposing it, then probe and start the exact candidate companion.
 - [ ] From a fresh Codex task, verify status, list, bounded read, bounded wait, and one send to one exact non-group Bot ID with no retry.

@@ -8,6 +8,7 @@ All notable changes will be documented here. This project follows [Semantic Vers
 
 - Stable local MCP access for isolated Grok calls and opt-in collaboration with named Bots already running inside Grok Bot.
 - Exact-version managed companion install, status, start, stop, ensure, restart, update, and retry-safe rollback.
+- Exact-artifact lifecycle staging from the currently invoked package, avoiding a second package-version resolution during install or update.
 
 ### Security
 

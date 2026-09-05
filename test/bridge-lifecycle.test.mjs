@@ -22,6 +22,7 @@ import {
   BridgeLifecycle,
   BridgeLifecycleError,
   preflightLifecycleRelease,
+  stageLifecycleRelease,
   startLifecycleRelease,
 } from "../dist/bridge-lifecycle.js";
 import {
@@ -37,6 +38,7 @@ import {
   stopManagedCompanion,
   waitForCompanionStop,
 } from "../dist/bridge-runtime.js";
+import { CODEX_GROK_VERSION } from "../dist/version.js";
 
 function release(version, byte) {
   return {
@@ -418,6 +420,57 @@ test("concurrent lifecycle mutations fail closed behind one private lock", async
   await assert.rejects(competing.run("install"), { message: "lifecycle_busy" });
   releaseCurrent();
   await pending;
+});
+
+test("staging installs the currently invoked package bytes without a registry package fetch", async (context) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-stage-current-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const packageRoot = join(sandbox, "package");
+  const lifecycleRoot = join(sandbox, "lifecycle");
+  await mkdir(join(packageRoot, "dist"), { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(packageRoot, "package.json"),
+    `${JSON.stringify({
+      name: "codex-grok-mcp",
+      version: CODEX_GROK_VERSION,
+      type: "module",
+      files: ["dist"],
+      bin: { "codex-grok-bridge": "dist/bridge-companion.js" },
+      scripts: {
+        prepack: 'node -e "require(\'node:fs\').writeFileSync(\'prepack-ran\',\'yes\')"',
+        postinstall:
+          'node -e "require(\'node:fs\').writeFileSync(\'postinstall-ran\',\'yes\')"',
+      },
+    })}\n`,
+    { mode: 0o644 },
+  );
+  await writeFile(
+    join(packageRoot, "dist", "bridge-companion.js"),
+    '#!/usr/bin/env node\nprocess.stdout.write("fixture\\n");\n',
+    { mode: 0o755 },
+  );
+
+  const staged = await stageLifecycleRelease(lifecycleRoot, packageRoot);
+  assert.equal(staged.version, CODEX_GROK_VERSION);
+  assert.match(staged.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/);
+  assert.deepEqual(staged.protocol_versions, [1, 2, 3]);
+  const digest = Buffer.from(staged.integrity.slice("sha512-".length), "base64").toString(
+    "base64url",
+  );
+  const releaseRoot = join(lifecycleRoot, "releases", staged.version, digest);
+  const installed = JSON.parse(
+    await readFile(join(releaseRoot, "node_modules", "codex-grok-mcp", "package.json"), "utf8"),
+  );
+  const lock = JSON.parse(await readFile(join(releaseRoot, "package-lock.json"), "utf8"));
+  assert.equal(installed.version, staged.version);
+  assert.equal(lock.packages["node_modules/codex-grok-mcp"].integrity, staged.integrity);
+  assert.match(lock.packages["node_modules/codex-grok-mcp"].resolved, /^file:/);
+  await assert.rejects(lstat(join(releaseRoot, ".candidate")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(packageRoot, "prepack-ran")), { code: "ENOENT" });
+  await assert.rejects(
+    lstat(join(releaseRoot, "node_modules", "codex-grok-mcp", "postinstall-ran")),
+    { code: "ENOENT" },
+  );
 });
 
 async function createFixtureRelease(root, version, byte) {

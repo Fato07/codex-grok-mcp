@@ -180,6 +180,8 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
 
 `install` is the bootstrap command. If an interrupted foreground companion left a lease behind, `install` reclaims only a private foreground lease whose recorded process is repeatedly proven gone. Active or unknown foreground leases, malformed leases, and managed mismatches still fail closed. An exact active managed candidate may be adopted.
 
+Lifecycle staging repacks the currently invoked package with lifecycle scripts disabled, verifies its SHA-512 identity, and installs those exact package bytes. It does not resolve the connector package a second time. This keeps an immutable npm version reproducible and lets maintainers test a verified local release tarball before publication.
+
 `status`, `start`, `stop`, and `ensure` are idempotent. `ensure` repairs an existing managed installation. It never creates the first installation or downloads another version. `restart` intentionally performs a fresh cycle:
 
 ```bash
