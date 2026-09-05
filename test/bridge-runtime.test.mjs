@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   CompanionLease,
   clearStaleCompanionLease,
+  clearStaleForegroundCompanionLease,
   companionLeasePath,
   inspectCompanionLease,
   stopManagedCompanion,
@@ -86,6 +97,86 @@ test("stale lease recovery unlinks only the revalidated exact owner", async (con
   assert.equal(await clearStaleCompanionLease(configPath), false);
 });
 
+test("foreground stale recovery accepts only a private legacy lease", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-runtime-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "private", "bridge.json");
+  const lockPath = companionLeasePath(configPath);
+  await mkdir(join(root, "private"), { mode: 0o700 });
+  await writeFile(lockPath, `${JSON.stringify(record())}\n`, { flag: "wx", mode: 0o600 });
+
+  await assert.rejects(clearStaleCompanionLease(configPath, { mode: "foreground" }), {
+    message: "companion_identity_unavailable",
+  });
+  assert.equal((await lstat(lockPath)).isFile(), true);
+  assert.equal(await clearStaleForegroundCompanionLease(configPath), true);
+  assert.deepEqual(await inspectCompanionLease(configPath), { state: "stopped" });
+
+  const missingParent = join(root, "missing");
+  assert.equal(
+    await clearStaleForegroundCompanionLease(join(missingParent, "bridge.json")),
+    false,
+  );
+  await assert.rejects(lstat(missingParent), { code: "ENOENT" });
+});
+
+test("foreground stale recovery refuses managed and active leases", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-runtime-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const parent = join(root, "private");
+  const configPath = join(parent, "bridge.json");
+  const lockPath = companionLeasePath(configPath);
+  const integrity = `sha512-${Buffer.alloc(64, 4).toString("base64")}`;
+  await mkdir(parent, { mode: 0o700 });
+  await writeFile(
+    lockPath,
+    `${JSON.stringify({
+      version: 2,
+      pid: 999_999,
+      process_start_id: "linux:00000000-0000-0000-0000-000000000000:1",
+      owner_token: token(6),
+      launch_token: token(5),
+      mode: "managed",
+      companion_version: "0.2.0-beta.7",
+      protocol_versions: [1, 2, 3],
+      release_integrity: integrity,
+    })}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+
+  await assert.rejects(clearStaleForegroundCompanionLease(configPath), {
+    message: "companion_identity_unavailable",
+  });
+  assert.equal((await lstat(lockPath)).isFile(), true);
+
+  await rm(lockPath);
+  await writeFile(
+    lockPath,
+    `${JSON.stringify(record({ pid: process.pid }))}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+  await assert.rejects(clearStaleForegroundCompanionLease(configPath), {
+    message: "companion_identity_unavailable",
+  });
+  assert.equal((await lstat(lockPath)).isFile(), true);
+});
+
+test("stale recovery refuses an insecure parent directory", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-runtime-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const parent = join(root, "private");
+  const configPath = join(parent, "bridge.json");
+  const lockPath = companionLeasePath(configPath);
+  await mkdir(parent, { mode: 0o700 });
+  await writeFile(lockPath, `${JSON.stringify(record())}\n`, { flag: "wx", mode: 0o600 });
+  await chmod(parent, 0o755);
+
+  await assert.rejects(clearStaleForegroundCompanionLease(configPath), {
+    message: "companion_lease_invalid",
+  });
+  assert.equal((await lstat(lockPath)).isFile(), true);
+});
+
 test("failed-candidate recovery requires the exact managed launch token", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-runtime-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -129,11 +220,11 @@ test("failed-candidate recovery requires the exact managed launch token", async 
   );
 });
 
-test("companion lease fails closed for malformed, symlinked, and wrong-mode locks", async (context) => {
+test("companion lease fails closed for malformed, linked, and wrong-mode locks", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-runtime-"));
   context.after(() => rm(root, { recursive: true, force: true }));
 
-  for (const kind of ["malformed", "symlink", "wrong-mode"]) {
+  for (const kind of ["malformed", "symlink", "hard-link", "wrong-mode"]) {
     const parent = join(root, kind);
     const configPath = join(parent, "bridge.json");
     const lockPath = companionLeasePath(configPath);
@@ -142,6 +233,10 @@ test("companion lease fails closed for malformed, symlinked, and wrong-mode lock
       const target = join(parent, "target");
       await writeFile(target, `${JSON.stringify(record())}\n`, { mode: 0o600 });
       await symlink(target, lockPath);
+    } else if (kind === "hard-link") {
+      const target = join(parent, "target");
+      await writeFile(target, `${JSON.stringify(record())}\n`, { mode: 0o600 });
+      await link(target, lockPath);
     } else {
       await writeFile(
         lockPath,
@@ -155,6 +250,9 @@ test("companion lease fails closed for malformed, symlinked, and wrong-mode lock
       message: "companion_lease_invalid",
     });
     await assert.rejects(inspectCompanionLease(configPath), {
+      message: "companion_lease_invalid",
+    });
+    await assert.rejects(clearStaleForegroundCompanionLease(configPath), {
       message: "companion_lease_invalid",
     });
     assert.equal((await lstat(lockPath)).isSymbolicLink(), kind === "symlink");
@@ -181,12 +279,19 @@ test("companion lease rejects a directory owned by another uid", async (context)
   context.after(() => rm(root, { recursive: true, force: true }));
   const parent = join(root, "private");
   await mkdir(parent, { mode: 0o700 });
+  const configPath = join(parent, "bridge.json");
+  const lockPath = companionLeasePath(configPath);
+  await writeFile(lockPath, `${JSON.stringify(record())}\n`, { mode: 0o600 });
   const uid = process.getuid();
   context.mock.method(process, "getuid", () => uid + 1);
 
-  await assert.rejects(CompanionLease.acquire(join(parent, "bridge.json")), {
+  await assert.rejects(CompanionLease.acquire(configPath), {
     message: "companion_lease_invalid",
   });
+  await assert.rejects(clearStaleForegroundCompanionLease(configPath), {
+    message: "companion_lease_invalid",
+  });
+  assert.equal((await lstat(lockPath)).isFile(), true);
 });
 
 test("lifecycle control never signals an unmanaged companion", async (context) => {

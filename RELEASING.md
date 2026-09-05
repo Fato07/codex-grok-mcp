@@ -77,6 +77,7 @@ Use accounts and data the maintainer is authorized to use. Store only redacted r
 
 ### Upgrade and rollback flow
 
+- [ ] Starting without lifecycle state, abruptly stop a valid foreground companion so its private lease is stale. Verify exact-version `install` reclaims only that proven-dead foreground lease, starts the managed candidate, preserves pairing, and becomes idempotent on repeated `install` and `ensure`.
 - [ ] Starting from the recorded rollback version and a new pairing, exercise one controlled failed update and verify that version remains healthy and recoverable.
 - [ ] Upgrade to the recorded candidate artifact, restart it, and repeat status plus one read-only operation without pairing again.
 - [ ] Complete the #6 soak scenarios for relay reconnect, companion restart, VM idle and resume, gateway descriptor/process/token rotation, read and wait recovery, and one no-retry exact-ID send.

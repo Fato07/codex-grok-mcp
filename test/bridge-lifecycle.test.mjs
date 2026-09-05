@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import {
   chmod,
@@ -30,6 +32,7 @@ import {
 } from "../dist/bridge-pairing.js";
 import {
   clearStaleCompanionLease,
+  clearStaleForegroundCompanionLease,
   inspectCompanionLease,
   stopManagedCompanion,
   waitForCompanionStop,
@@ -98,6 +101,10 @@ function harness(root) {
     inspect: async () => processStatus,
     recoverStale: async () => {
       actions.push("recover-stale");
+      processStatus = { state: "stopped" };
+    },
+    recoverForegroundStale: async () => {
+      actions.push("recover-foreground-stale");
       processStatus = { state: "stopped" };
     },
     stop: async () => {
@@ -173,6 +180,103 @@ test("managed lifecycle is idempotent and preserves exact current/previous relea
   result = await lifecycle.run("start");
   assert.equal(result.state, "running");
   assert.equal(result.changed, true);
+});
+
+test("install migrates a revalidated stale foreground lease into managed lifecycle", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+
+  controls.setStatus({ state: "stale", managed: false });
+  assert.deepEqual(await lifecycle.run("status"), {
+    command: "status",
+    state: "stale",
+    changed: false,
+    active_version: null,
+    previous_version: null,
+    protocol_versions: [],
+    pairing_valid: true,
+  });
+  await assert.rejects(lifecycle.run("ensure"), { message: "not_installed" });
+  const result = await lifecycle.run("install");
+
+  assert.equal(result.state, "running");
+  assert.equal(result.active_version, "0.2.0-beta.5");
+  assert.equal(result.pairing_valid, true);
+  assert.deepEqual(actions, [
+    "preflight:0.2.0-beta.5",
+    "recover-foreground-stale",
+    "start:0.2.0-beta.5",
+  ]);
+  assert.equal((await lifecycle.run("install")).changed, false);
+  assert.equal((await lifecycle.run("ensure")).changed, false);
+});
+
+test("install never reclaims an active foreground lease", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+
+  controls.setStatus({ state: "active", managed: false });
+  await assert.rejects(lifecycle.run("install"), { message: "companion_not_managed" });
+  assert.deepEqual(actions, []);
+});
+
+test("install leaves a stale foreground lease intact when preflight changes pairing", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+
+  controls.setStatus({ state: "stale", managed: false });
+  controls.mutatePairingDuringPreflight = true;
+  await assert.rejects(lifecycle.run("install"), { message: "pairing_changed" });
+  assert.deepEqual(actions, ["preflight:0.2.0-beta.5"]);
+});
+
+test("install never reclaims an unknown foreground lease", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+
+  controls.setStatus({ state: "unknown", managed: false });
+  await assert.rejects(lifecycle.run("install"), { message: "candidate_start_failed" });
+  assert.deepEqual(actions, []);
+});
+
+test("initial install recovers only an exact stale managed candidate", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const exact = release("0.2.0-beta.5", 1);
+  const { lifecycle, controls, actions } = harness(root);
+
+  controls.setStatus({
+    state: "stale",
+    managed: true,
+    companionVersion: exact.version,
+    protocolVersions: [...exact.protocol_versions],
+    releaseIntegrity: exact.integrity,
+  });
+  assert.equal((await lifecycle.run("install")).state, "running");
+  assert.deepEqual(actions, [
+    "recover-stale",
+    "preflight:0.2.0-beta.5",
+    "start:0.2.0-beta.5",
+  ]);
+
+  const otherRoot = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(otherRoot, { recursive: true, force: true }));
+  const other = harness(otherRoot);
+  other.controls.setStatus({
+    state: "stale",
+    managed: true,
+    companionVersion: "0.2.0-beta.4",
+    protocolVersions: [1, 2, 3],
+    releaseIntegrity: release("0.2.0-beta.4", 4).integrity,
+  });
+  await assert.rejects(other.lifecycle.run("install"), {
+    message: "candidate_start_failed",
+  });
+  assert.deepEqual(other.actions, []);
 });
 
 test("pairing changes abort update before the running companion is stopped", async (context) => {
@@ -524,12 +628,53 @@ test("Linux lifecycle performs a real detached install, update, restart, and rol
         releaseIntegrity: candidate.integrity,
       });
     },
+    recoverForegroundStale: async () => {
+      await clearStaleForegroundCompanionLease(configPath);
+    },
     stop: async () => {
       await stopManagedCompanion(configPath);
       await waitForCompanionStop(configPath, 5_000);
     },
   };
   const lifecycle = new BridgeLifecycle({ root, hooks });
+  const runtimeUrl = pathToFileURL(join(process.cwd(), "dist", "bridge-runtime.js")).href;
+  const foreground = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { CompanionLease } from ${JSON.stringify(runtimeUrl)};
+await CompanionLease.acquire(process.argv[1]);
+process.stdout.write("ready\\n");
+setInterval(() => {}, 1_000);
+`,
+      configPath,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  context.after(async () => {
+    if (foreground.exitCode === null && foreground.signalCode === null) {
+      foreground.kill("SIGKILL");
+      await once(foreground, "exit").catch(() => undefined);
+    }
+  });
+  await Promise.race([
+    once(foreground.stdout, "data"),
+    once(foreground, "exit").then(() => {
+      throw new Error("foreground fixture exited before acquiring its lease");
+    }),
+  ]);
+  assert.deepEqual(await inspectCompanionLease(configPath), {
+    state: "active",
+    managed: false,
+  });
+  const foregroundExited = once(foreground, "exit");
+  foreground.kill("SIGKILL");
+  await foregroundExited;
+  assert.deepEqual(await inspectCompanionLease(configPath), {
+    state: "stale",
+    managed: false,
+  });
   context.after(async () => {
     const status = await inspectCompanionLease(configPath).catch(() => ({ state: "stopped" }));
     if (status.state === "active" && status.managed) {

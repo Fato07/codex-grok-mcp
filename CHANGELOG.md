@@ -2,6 +2,16 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.8] - 2026-09-05
+
+### Fixed
+
+- Let the first managed `install` reclaim only a strictly revalidated dead foreground lease, while preserving pairing and refusing active, unknown, malformed, or managed-mismatch leases.
+
+### Changed
+
+- Clarify that `install` bootstraps managed lifecycle and `ensure` only repairs an existing installation.
+
 ## [0.2.0-beta.7] - 2026-09-04
 
 ### Changed
