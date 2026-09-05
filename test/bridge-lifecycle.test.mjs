@@ -709,7 +709,7 @@ setInterval(() => {}, 1_000);
   assert.deepEqual(await inspectCompanionLease(configPath), { state: "stopped" });
 });
 
-test("Linux lifecycle performs a real detached install, update, restart, and rollback", async (context) => {
+test("Linux lifecycle performs a real detached install, update, restart, rollback, and uninstall", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
   const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-linux-"));
   const root = join(sandbox, "lifecycle");
@@ -848,8 +848,13 @@ setInterval(() => {}, 1_000);
   assert.equal(result.previous_version, null);
   assert.equal((await lifecycle.run("rollback")).changed, false);
 
-  const afterPairing = await loadPairingConfigSnapshot(configPath);
-  assert.deepEqual(afterPairing.identity, beforePairing.identity);
-  result = await lifecycle.run("stop");
-  assert.equal(result.state, "stopped");
+  result = await lifecycle.run("uninstall");
+  assert.equal(result.state, "not_installed");
+  assert.equal(result.changed, true);
+  assert.equal(result.active_version, null);
+  assert.equal(result.previous_version, null);
+  assert.deepEqual((await loadPairingConfigSnapshot(configPath)).identity, beforePairing.identity);
+  await assert.rejects(lstat(join(root, "state.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "releases")), { code: "ENOENT" });
+  assert.equal((await lifecycle.run("uninstall")).changed, false);
 });
