@@ -82,8 +82,8 @@ test("release version copies match package.json", async () => {
     ["release tag", /releases\/tag\/([^\"]+)/g, `v${version}`],
     ["release badge label", /releases\/tag\/[^\"]+\">([^<]+)<\/a>/g, `v${version}`],
     [
-      "supported public beta package",
-      /supported public beta is the exact npm package `codex-grok-mcp@([^`]+)`/g,
+      "supported release package",
+      /supported release is the exact npm package `codex-grok-mcp@([^`]+)`/g,
       version,
     ],
     ["marketplace release ref", /marketplace add Fato07\/codex-grok-mcp --ref (\S+)/g, `v${version}`],
@@ -108,9 +108,9 @@ test("release version copies match package.json", async () => {
   check("README.md", "companion run package pins", runPins, [version, "beta"]);
   checkCopies(
     "SECURITY.md",
-    "supported public beta",
+    "supported release",
     security,
-    /^`([^`]+)` is the supported public beta\./gm,
+    /^`([^`]+)` is the supported release\./gm,
     version,
   );
   check(

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`0.2.0-beta.8` is the supported public beta. Security fixes target the current source revision and the next prerelease.
+`0.2.0` is the supported release. Security fixes target the current source revision and the next compatible release.
 
 ## Trust boundary
 
@@ -62,7 +62,7 @@ Bot sends are external writes. `grok_send_bot_message` requires an exact Bot ID 
 
 A timeout, cancellation, malformed response, ambiguous HTTP status, or network break after a send starts is reported as `outcome_unknown`, not failed, because the write may have reached the gateway. Relay close codes are untrusted and cannot turn a post-send outcome into a definite failure. Cancellation stops the sequence and marks remaining targets `not_attempted`.
 
-The send completion boundary `gateway_accepted_not_bot_reply` is not proof of a Bot reply, task completion, or message persistence. The gateway protocol is unofficial and unsupported by xAI; compatibility and security behavior may change without notice. A live paired operator smoke test verified roster listing, unique exact-ID gateway acceptance receipts, and later bounded transcript observation without connector errors or retries. Transcript position still does not prove reply correlation, and background lifecycle remains unverified.
+The send completion boundary `gateway_accepted_not_bot_reply` is not proof of a Bot reply, task completion, or message persistence. The gateway protocol is unofficial and unsupported by xAI; compatibility and security behavior may change without notice. A live paired operator smoke test verified roster listing, unique exact-ID gateway acceptance receipts, and later bounded transcript observation without connector errors or retries. A separate live managed-lifecycle matrix verified install idempotence, pre-cutover failure preservation, exact update, restart, rollback, and candidate restoration while pairing bytes and permissions remained unchanged. Neither result proves reply correlation or task completion.
 
 ## Logging and diagnostics
 
@@ -90,7 +90,7 @@ Doctor must be read-only and must not submit a model request.
 - Verify uncertain failures through the direct Grok CLI before retrying; a request may already have consumed allowance.
 - For Bot sends, inspect per-Bot receipts before any new attempt; an accepted or timed-out request may already have reached a Bot.
 - Enter pairing codes only in Grok Bot's Computer terminal, never in a Bot/Codex prompt. `pair --force` changes the saved channel for future processes but does not revoke the old stateless relay channel. If pairing material may have been exposed, stop both sides, end old Codex tasks, rotate the relay master, and pair again.
-- Keep the VM companion in the foreground until a supported lifecycle mechanism is verified. A stopped companion means Bot tools are unavailable, not safe to retry after an uncertain send.
+- Use the exact-version managed lifecycle for unattended companion persistence. A stopped companion means Bot tools are unavailable, not safe to retry after an uncertain send.
 - For the legacy fallback, provide only a gateway URL and token you are authorized to use. Never paste the token into prompts or issue reports.
 - Prefer audited source or an exact immutable maintainer-controlled release. The optional npm `@beta` command accepts mutable-channel risk to update on restart; do not use it where unattended beta code is unacceptable. Never execute a mutable GitHub default branch inside the Grok Bot VM.
 
