@@ -269,7 +269,16 @@ async function ensurePrivateParent(path: string): Promise<void> {
   const parent = dirname(path);
   try {
     await mkdir(parent, { recursive: true, mode: 0o700 });
-    const details = await lstat(parent);
+    await validatePrivateParent(path);
+  } catch (caught) {
+    if (caught instanceof BridgeRuntimeError) throw caught;
+    fail();
+  }
+}
+
+async function validatePrivateParent(path: string): Promise<void> {
+  try {
+    const details = await lstat(dirname(path));
     if (
       details.isSymbolicLink() ||
       !details.isDirectory() ||
@@ -399,7 +408,7 @@ export async function stopManagedCompanion(configPath: string): Promise<void> {
   }
 }
 
-function matchesExpected(
+function matchesManagedExpected(
   record: LeaseRecord,
   expected: ExpectedManagedLease | undefined,
 ): boolean {
@@ -412,9 +421,9 @@ function matchesExpected(
   );
 }
 
-export async function clearStaleCompanionLease(
+async function clearStaleLease(
   configPath: string,
-  expected?: ExpectedManagedLease,
+  matches: (record: LeaseRecord) => boolean,
 ): Promise<boolean> {
   const path = companionLeasePath(configPath);
   let snapshot: LeaseSnapshot;
@@ -425,7 +434,8 @@ export async function clearStaleCompanionLease(
     if (caught instanceof BridgeRuntimeError) throw caught;
     fail();
   }
-  if (processState(snapshot.record) !== "stale" || !matchesExpected(snapshot.record, expected)) {
+  await validatePrivateParent(path);
+  if (processState(snapshot.record) !== "stale" || !matches(snapshot.record)) {
     fail("companion_identity_unavailable");
   }
   const current = await readLease(path).catch(() => fail());
@@ -434,16 +444,32 @@ export async function clearStaleCompanionLease(
     current.inode !== snapshot.inode ||
     current.record.owner_token !== snapshot.record.owner_token ||
     processState(current.record) !== "stale" ||
-    !matchesExpected(current.record, expected)
+    !matches(current.record)
   ) {
     fail("companion_identity_unavailable");
   }
+  await validatePrivateParent(path);
   try {
     await unlink(path);
     return true;
   } catch {
     fail("companion_identity_unavailable");
   }
+}
+
+export async function clearStaleCompanionLease(
+  configPath: string,
+  expected?: ExpectedManagedLease,
+): Promise<boolean> {
+  return await clearStaleLease(configPath, (record) =>
+    matchesManagedExpected(record, expected),
+  );
+}
+
+export async function clearStaleForegroundCompanionLease(
+  configPath: string,
+): Promise<boolean> {
+  return await clearStaleLease(configPath, (record) => record.version === LEASE_VERSION);
 }
 
 export async function waitForCompanionStop(

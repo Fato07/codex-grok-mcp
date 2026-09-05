@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://fato07.github.io/codex-grok-mcp/">Website</a> ·
   <a href="https://www.npmjs.com/package/codex-grok-mcp">npm</a> ·
-  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.7">v0.2.0-beta.7</a>
+  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.8">v0.2.0-beta.8</a>
 </p>
 
 An unofficial, local-first bridge that lets Codex ask Grok once or collaborate with named Grok Bots already running inside the Grok Bot app.
@@ -25,7 +25,7 @@ An unofficial, local-first bridge that lets Codex ask Grok once or collaborate w
 | Linux isolated CLI path | Unverified |
 | Windows, WSL, and Codex cloud | Unsupported or unverified |
 
-The supported public beta is the exact npm package `codex-grok-mcp@0.2.0-beta.7` and its immutable GitHub prerelease.
+The supported public beta is the exact npm package `codex-grok-mcp@0.2.0-beta.8` and its immutable GitHub prerelease.
 
 ## Quick start
 
@@ -40,7 +40,7 @@ For one-off `grok_ask` calls, install and sign in to Grok CLI (`grok --version` 
 Install the immutable marketplace release and plugin:
 
 ```bash
-codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.7
+codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.8
 codex plugin add codex-grok-mcp@codex-grok
 ```
 
@@ -52,12 +52,12 @@ Ask Grok to challenge this architecture and return the three strongest objection
 
 That uses the one-off path. To work with Bots already running in Grok Bot, complete [the persistent Bot setup](#connect-codex-to-grok-bots).
 
-The plugin runs only `codex-grok-mcp@0.2.0-beta.7` through `npx`. It does not change Grok authentication.
+The plugin runs only `codex-grok-mcp@0.2.0-beta.8` through `npx`. It does not change Grok authentication.
 
 For direct MCP setup without the plugin wrapper:
 
 ```bash
-codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-mcp
+codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-mcp
 ```
 
 Start a new Codex task after adding the server.
@@ -65,7 +65,7 @@ Start a new Codex task after adding the server.
 ## Check setup
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-mcp --doctor
+npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-mcp --doctor
 ```
 
 Doctor checks the local executable, login, and selected model without sending a prompt. It must not print authentication material.
@@ -131,7 +131,7 @@ From the repository root on the Mac:
 
 ```bash
 CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" \
-npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- \
+npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- \
 codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
 unset RELAY_TOKEN
 ```
@@ -143,8 +143,8 @@ The command prints a private pairing code only in the interactive terminal.
 In **Grok Bot's Computer** terminal, not in a Bot chat, run:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-bridge connect
+npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-bridge connect
 ```
 
 Paste the pairing code into the no-echo prompt. Keep the terminal running while using Bot tools.
@@ -154,8 +154,8 @@ Paste the pairing code into the no-echo prompt. Keep the terminal running while 
 Stop the foreground companion with `Ctrl-C`, then run the chosen exact version:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-bridge run
+npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-bridge run
 ```
 
 For automatic beta updates on each restart, with the reproducibility tradeoff made explicit:
@@ -178,7 +178,9 @@ VERSION=<exact-version>
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
 ```
 
-`status`, `start`, `stop`, and `ensure` are idempotent. `restart` intentionally performs a fresh cycle:
+`install` is the bootstrap command. If an interrupted foreground companion left a lease behind, `install` reclaims only a private foreground lease whose recorded process is repeatedly proven gone. Active or unknown foreground leases, malformed leases, and managed mismatches still fail closed. An exact active managed candidate may be adopted.
+
+`status`, `start`, `stop`, and `ensure` are idempotent. `ensure` repairs an existing managed installation. It never creates the first installation or downloads another version. `restart` intentionally performs a fresh cycle:
 
 ```bash
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge status
@@ -187,6 +189,14 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge stop
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge restart
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge ensure
 ```
+
+| Reported state | Next command |
+|---|---|
+| `not_installed` | `install` |
+| `unmanaged` | Stop the foreground command cleanly, then run `install` |
+| `stale` with no installed version | `install` |
+| `stopped` with an installed version | `ensure` or `start` |
+| `running` | No action, or an explicit exact-version `update` |
 
 An exact update stages and checks the replacement before the healthy process stops. The prior exact release stays available for one retry-safe rollback:
 
@@ -233,7 +243,7 @@ The plugin passes only these connector options. Pairing is stored in a private m
 - **CLI missing or signed out:** run `grok --version`, `grok models`, and the pinned doctor command. Complete normal Grok login outside Codex.
 - **`UPGRADE_REQUIRED`:** stop and restart the VM companion with the same package version as the connector.
 - **`DATA_ROOT_SYMLINK`:** set `SAND_DATA_ROOT` to the real Grok Bot data directory, not a symlink. The companion rejects symlinked descriptor parents.
-- **`companion_lease_stale`:** a lifecycle-capable managed install can run the exact pinned `ensure` command, which clears only a revalidated dead managed lease. For a foreground install, verify the recorded PID is gone before removing only the adjacent `bridge.json.lock`.
+- **`companion_lease_stale`:** run the exact pinned `install` command when no managed version is installed. It can reclaim only a strictly revalidated dead foreground lease. Use `ensure` only after managed installation. Do not delete the lease manually.
 - **Uncertain send:** inspect the Bot before considering any new action. A retry may duplicate a message.
 
 When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, and connector versions. Never attach authentication files, pairing codes, gateway/relay tokens, prompts, responses, transcripts, or private paths.
@@ -243,19 +253,19 @@ When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, 
 1. Stop the VM companion. Press `Ctrl-C` for a foreground process. For a managed lifecycle install, run:
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-bridge stop
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-bridge stop
    ```
 
 2. In the VM terminal, remove its pairing:
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-bridge unpair
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-bridge unpair
    ```
 
 3. On the Mac, remove the local pairing:
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0-beta.7 -- codex-grok-mcp unpair
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.8 -- codex-grok-mcp unpair
    ```
 
 4. Uninstall **Codex Grok MCP** in Codex. If configured directly, run `codex mcp remove grok`. Then remove the marketplace with `codex plugin marketplace remove codex-grok`.

@@ -23,6 +23,7 @@ import {
   BridgeRuntimeError,
   CompanionLease,
   clearStaleCompanionLease,
+  clearStaleForegroundCompanionLease,
   inspectCompanionLease,
   stopManagedCompanion,
   waitForCompanionStop,
@@ -90,6 +91,7 @@ type LifecycleHooks = {
   start(release: LifecycleRelease): Promise<void>;
   inspect(): Promise<CompanionLeaseStatus>;
   recoverStale(release: LifecycleRelease): Promise<void>;
+  recoverForegroundStale(): Promise<void>;
   stop(): Promise<void>;
 };
 
@@ -777,6 +779,9 @@ function defaultHooks(root: string, configPath: string): LifecycleHooks {
         releaseIntegrity: release.integrity,
       });
     },
+    recoverForegroundStale: async () => {
+      await clearStaleForegroundCompanionLease(configPath);
+    },
     stop: async () => {
       await stopManagedCompanion(configPath);
       await waitForCompanionStop(configPath, STOP_TIMEOUT_MS);
@@ -915,14 +920,23 @@ export class BridgeLifecycle {
     ) {
       return true;
     }
-    const processStatus = await this.#recoverStale(await this.#hooks.inspect(), release);
+    const inspected = await this.#hooks.inspect();
+    let pairing: Buffer | undefined;
+    let processStatus: CompanionLeaseStatus;
+    if (inspected.state === "stale" && !inspected.managed) {
+      pairing = await this.#validatedCandidate(release);
+      await this.#hooks.recoverForegroundStale();
+      processStatus = await this.#hooks.inspect();
+    } else {
+      processStatus = await this.#recoverStale(inspected, release);
+    }
     if (processStatus.state !== "stopped") {
       if (processStatus.state === "active" && !processStatus.managed) {
         throw new BridgeRuntimeError("companion_not_managed");
       }
       fail("candidate_start_failed");
     }
-    const pairing = await this.#validatedCandidate(release);
+    pairing ??= await this.#validatedCandidate(release);
     await this.#hooks.start(release);
     await this.#assertPairingUnchanged(pairing);
     try {
