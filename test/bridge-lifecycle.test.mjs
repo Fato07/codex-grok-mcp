@@ -56,6 +56,7 @@ function harness(root) {
   const controls = {
     failStart: undefined,
     mutatePairingDuringPreflight: false,
+    onStop: undefined,
     setCurrent(next) {
       current = next;
     },
@@ -64,6 +65,9 @@ function harness(root) {
     },
     setStatus(status) {
       processStatus = status;
+    },
+    setOnStop(callback) {
+      controls.onStop = callback;
     },
     mutatePairing() {
       pairing = Buffer.from("pairing-b");
@@ -112,6 +116,7 @@ function harness(root) {
     stop: async () => {
       actions.push("stop");
       processStatus = { state: "stopped" };
+      await controls.onStop?.();
     },
   };
   return {
@@ -182,6 +187,88 @@ test("managed lifecycle is idempotent and preserves exact current/previous relea
   result = await lifecycle.run("start");
   assert.equal(result.state, "running");
   assert.equal(result.changed, true);
+});
+
+test("uninstall stops only the managed companion and removes only managed lifecycle data", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-uninstall-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, "companion");
+  const unrelated = join(parent, "keep.txt");
+  const { lifecycle, actions } = harness(root);
+  await lifecycle.run("install");
+  await mkdir(join(root, "releases", "owned"), { recursive: true, mode: 0o700 });
+  await writeFile(join(root, "releases", "owned", "release.txt"), "owned\n", {
+    mode: 0o600,
+  });
+  await writeFile(unrelated, "keep\n", { mode: 0o600 });
+
+  const result = await lifecycle.run("uninstall");
+  assert.deepEqual(result, {
+    command: "uninstall",
+    state: "not_installed",
+    changed: true,
+    active_version: null,
+    previous_version: null,
+    protocol_versions: [],
+    pairing_valid: true,
+  });
+  assert.equal(actions.at(-1), "stop");
+  await assert.rejects(lstat(join(root, "state.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "releases")), { code: "ENOENT" });
+  assert.equal(await readFile(unrelated, "utf8"), "keep\n");
+  assert.equal((await lifecycle.run("uninstall")).changed, false);
+});
+
+test("uninstall refuses an unsafe release store before stopping the companion", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-uninstall-unsafe-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, "companion");
+  const outside = join(parent, "outside");
+  const { lifecycle, actions } = harness(root);
+  await lifecycle.run("install");
+  await mkdir(outside, { mode: 0o700 });
+  await writeFile(join(outside, "keep.txt"), "keep\n", { mode: 0o600 });
+  await symlink(outside, join(root, "releases"), "dir");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("uninstall"), { message: "lifecycle_state_invalid" });
+  assert.deepEqual(actions.slice(before), []);
+  assert.equal(await readFile(join(outside, "keep.txt"), "utf8"), "keep\n");
+  assert.equal((await lstat(join(root, "state.json"))).isFile(), true);
+});
+
+test("uninstall never stops an unmanaged companion or removes installed state", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-uninstall-unmanaged-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  await lifecycle.run("install");
+  controls.setStatus({ state: "active", managed: false });
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("uninstall"), { message: "companion_not_managed" });
+  assert.deepEqual(actions.slice(before), []);
+  assert.equal((await lstat(join(root, "state.json"))).isFile(), true);
+});
+
+test("uninstall revalidates the release store after stopping", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-uninstall-race-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, "companion");
+  const releases = join(root, "releases");
+  const outside = join(parent, "outside");
+  const { lifecycle, controls } = harness(root);
+  await lifecycle.run("install");
+  await mkdir(join(releases, "owned"), { recursive: true, mode: 0o700 });
+  await mkdir(outside, { mode: 0o700 });
+  await writeFile(join(outside, "keep.txt"), "keep\n", { mode: 0o600 });
+  controls.setOnStop(async () => {
+    await rm(releases, { recursive: true, force: true });
+    await symlink(outside, releases, "dir");
+  });
+
+  await assert.rejects(lifecycle.run("uninstall"), { message: "lifecycle_state_invalid" });
+  assert.equal(await readFile(join(outside, "keep.txt"), "utf8"), "keep\n");
+  assert.equal((await lstat(join(root, "state.json"))).isFile(), true);
 });
 
 test("install migrates a revalidated stale foreground lease into managed lifecycle", async (context) => {

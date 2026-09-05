@@ -53,7 +53,8 @@ export type LifecycleCommand =
   | "restart"
   | "update"
   | "rollback"
-  | "ensure";
+  | "ensure"
+  | "uninstall";
 
 export type LifecycleRelease = {
   version: string;
@@ -85,6 +86,18 @@ export type LifecycleResult = {
 };
 
 type ProcessResult = { stdout: string };
+
+type RemovalSnapshot = {
+  path: string;
+  device: number;
+  inode: number;
+  kind: "directory" | "file";
+};
+
+type LifecycleRemovalPlan = {
+  state: RemovalSnapshot | undefined;
+  releases: RemovalSnapshot | undefined;
+};
 
 type LifecycleHooks = {
   currentRelease(): Promise<LifecycleRelease>;
@@ -327,6 +340,70 @@ async function loadState(root: string): Promise<LifecycleState | undefined> {
 
 async function saveState(root: string, state: LifecycleState): Promise<void> {
   await writePrivateJson(statePath(root), state);
+}
+
+async function removalSnapshot(
+  path: string,
+  kind: RemovalSnapshot["kind"],
+  required: boolean,
+): Promise<RemovalSnapshot | undefined> {
+  try {
+    const details = await lstat(path);
+    const validKind = kind === "file" ? details.isFile() : details.isDirectory();
+    const validMode =
+      kind === "file"
+        ? details.nlink === 1 && (details.mode & 0o7777) === 0o600
+        : (details.mode & 0o7777) === 0o700;
+    if (details.isSymbolicLink() || !validKind || details.uid !== currentUid() || !validMode) {
+      fail("lifecycle_state_invalid");
+    }
+    return {
+      path,
+      device: details.dev,
+      inode: details.ino,
+      kind,
+    };
+  } catch (caught) {
+    if (!required && isNodeError(caught) && caught.code === "ENOENT") return undefined;
+    if (caught instanceof BridgeLifecycleError) throw caught;
+    fail("lifecycle_state_invalid");
+  }
+}
+
+async function prepareLifecycleRemoval(
+  root: string,
+  statePresent: boolean,
+): Promise<LifecycleRemovalPlan> {
+  const state = await removalSnapshot(statePath(root), "file", statePresent);
+  if (!statePresent && state !== undefined) fail("lifecycle_state_invalid");
+  return {
+    state,
+    releases: await removalSnapshot(join(root, "releases"), "directory", false),
+  };
+}
+
+async function removeLifecycleData(plan: LifecycleRemovalPlan): Promise<boolean> {
+  for (const snapshot of [plan.releases, plan.state]) {
+    if (snapshot === undefined) continue;
+    const current = await removalSnapshot(snapshot.path, snapshot.kind, true);
+    if (
+      current === undefined ||
+      current.device !== snapshot.device ||
+      current.inode !== snapshot.inode
+    ) {
+      fail("lifecycle_state_invalid");
+    }
+    try {
+      if (snapshot.kind === "directory") {
+        await rm(snapshot.path, { recursive: true, force: false });
+      } else {
+        await unlink(snapshot.path);
+      }
+    } catch {
+      fail("lifecycle_state_invalid");
+    }
+  }
+  return plan.state !== undefined || plan.releases !== undefined;
 }
 
 function releaseDirectory(root: string, release: LifecycleRelease): string {
@@ -904,8 +981,10 @@ export class BridgeLifecycle {
               : command === "restart"
                 ? await this.#restart()
                 : command === "update"
-                  ? await this.#update()
-                  : await this.#rollback();
+                ? await this.#update()
+                  : command === "rollback"
+                    ? await this.#rollback()
+                    : await this.#uninstall();
       return await this.#result(command, changed);
     } finally {
       await lock.release();
@@ -1168,6 +1247,46 @@ export class BridgeLifecycle {
     };
     if (await this.#adoptRunning(state.previous, next)) return true;
     return await this.#switch(state, state.previous, next);
+  }
+
+  async #uninstall(): Promise<boolean> {
+    const state = await loadState(this.#root);
+    const removal = await prepareLifecycleRemoval(this.#root, state !== undefined);
+    const pairing = await this.#hooks.pairingIdentity().catch(() => undefined);
+    let status = await this.#hooks.inspect();
+    let processChanged = false;
+
+    if (status.state === "active") {
+      if (
+        !status.managed ||
+        (state !== undefined &&
+          (status.companionVersion !== state.active.version ||
+            status.releaseIntegrity !== state.active.integrity))
+      ) {
+        throw new BridgeRuntimeError("companion_not_managed");
+      }
+      await this.#hooks.stop();
+      processChanged = true;
+      status = { state: "stopped" };
+    } else if (status.state === "stale") {
+      if (!status.managed) throw new BridgeRuntimeError("companion_not_managed");
+      const staleRelease: LifecycleRelease = {
+        version: status.companionVersion,
+        integrity: status.releaseIntegrity,
+        protocol_versions: [...status.protocolVersions],
+      };
+      if (state !== undefined && !sameRelease(staleRelease, state.active)) {
+        fail("cutover_unknown");
+      }
+      await this.#hooks.recoverStale(staleRelease);
+      processChanged = true;
+      status = { state: "stopped" };
+    }
+
+    if (status.state !== "stopped") fail("cutover_unknown");
+    const dataChanged = await removeLifecycleData(removal);
+    if (pairing !== undefined) await this.#assertPairingUnchanged(pairing);
+    return processChanged || dataChanged;
   }
 
   async #result(command: LifecycleCommand, changed: boolean): Promise<LifecycleResult> {

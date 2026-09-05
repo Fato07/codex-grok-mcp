@@ -713,6 +713,7 @@ export async function runBridgeCompanion(
     "update",
     "rollback",
     "ensure",
+    "uninstall",
   ];
   const internalCommands = ["_managed-preflight", "_managed-run"];
   const validArgs = argv.length === 1 || (command === "connect" && force);

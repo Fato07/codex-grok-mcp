@@ -74,7 +74,7 @@ Use accounts and data the maintainer is authorized to use. Store only redacted r
 - [ ] On a clean host and VM, create a new pairing without exposing it, then probe and start the exact candidate companion.
 - [ ] From a fresh Codex task, verify status, list, bounded read, bounded wait, and one send to one exact non-group Bot ID with no retry.
 - [ ] Stop and restart the exact candidate, then repeat status plus one read-only operation without pairing again.
-- [ ] Uninstall the exact candidate last, and verify that only connector-owned configuration is removed. Grok authentication, Bot data, and unrelated files remain unchanged.
+- [ ] Run the exact candidate's managed `uninstall` last and verify that it removes the managed release store and lifecycle state while preserving pairing. Then unpair both endpoints and remove the Codex plugin. Grok authentication, Bot data, replay protection, and unrelated files remain unchanged.
 
 ### Upgrade and rollback flow
 

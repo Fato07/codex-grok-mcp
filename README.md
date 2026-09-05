@@ -182,7 +182,7 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
 
 Lifecycle staging repacks the currently invoked package with lifecycle scripts disabled, verifies its SHA-512 identity, and installs those exact package bytes. It does not resolve the connector package a second time. This keeps an immutable npm version reproducible and lets maintainers test a verified local release tarball before publication.
 
-`status`, `start`, `stop`, and `ensure` are idempotent. `ensure` repairs an existing managed installation. It never creates the first installation or downloads another version. `restart` intentionally performs a fresh cycle:
+`status`, `start`, `stop`, `ensure`, and `uninstall` are idempotent. `ensure` repairs an existing managed installation. It never creates the first installation or downloads another version. `restart` intentionally performs a fresh cycle:
 
 ```bash
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge status
@@ -190,6 +190,7 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge start
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge stop
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge restart
 npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge ensure
+npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge uninstall
 ```
 
 | Reported state | Next command |
@@ -252,10 +253,10 @@ When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, 
 
 ## Uninstall
 
-1. Stop the VM companion. Press `Ctrl-C` for a foreground process. For a managed lifecycle install, run:
+1. Press `Ctrl-C` for a foreground VM companion. For a managed lifecycle install, run `uninstall`; it stops the exact managed process and removes only the private managed release store and lifecycle state. It preserves pairing and replay protection for the explicit steps that follow.
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0 -- codex-grok-bridge stop
+   npx --yes --package=codex-grok-mcp@0.2.0 -- codex-grok-bridge uninstall
    ```
 
 2. In the VM terminal, remove its pairing:
