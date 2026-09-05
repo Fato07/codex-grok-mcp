@@ -46,10 +46,11 @@ test("later stale public pins report their file and field", () => {
 });
 
 test("release version copies match package.json", async () => {
-  const [pkg, lock, plugin, mcp, readme, security, changelog, website, bugReport] =
+  const [pkg, lock, shrinkwrap, plugin, mcp, readme, security, changelog, website, bugReport] =
     await Promise.all([
       readJson("package.json"),
       readJson("package-lock.json"),
+      readJson("npm-shrinkwrap.json"),
       readJson("plugins/codex-grok-mcp/.codex-plugin/plugin.json"),
       readJson("plugins/codex-grok-mcp/.mcp.json"),
       read("README.md"),
@@ -62,6 +63,13 @@ test("release version copies match package.json", async () => {
 
   check("package-lock.json", "version", lock.version, version);
   check("package-lock.json", 'packages[""].version', lock.packages?.[""]?.version, version);
+  check("npm-shrinkwrap.json", "matches package-lock.json", shrinkwrap, lock);
+  check(
+    "package.json",
+    "files includes npm-shrinkwrap.json",
+    pkg.files?.includes("npm-shrinkwrap.json"),
+    true,
+  );
   check("src/version.ts", "CODEX_GROK_VERSION", CODEX_GROK_VERSION, version);
   check(
     "plugins/codex-grok-mcp/.codex-plugin/plugin.json",
@@ -76,6 +84,17 @@ test("release version copies match package.json", async () => {
       .filter((argument) => argument.startsWith("--package="))
       .map((argument) => argument.slice("--package=".length)),
     [`${pkg.name}@${version}`],
+  );
+  check(
+    "plugins/codex-grok-mcp/.mcp.json",
+    "offline candidate-test passthrough",
+    (mcp.mcpServers?.grok?.env_vars ?? []).filter((name) => name.startsWith("NPM_CONFIG_")),
+    [
+      "NPM_CONFIG_CACHE",
+      "NPM_CONFIG_OFFLINE",
+      "NPM_CONFIG_REGISTRY",
+      "NPM_CONFIG_REPLACE_REGISTRY_HOST",
+    ],
   );
 
   for (const [field, pattern, expected] of [

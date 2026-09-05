@@ -29,6 +29,7 @@
     "relay/vitest.config.ts",
     "relay/worker-configuration.d.ts",
     "relay/wrangler.jsonc",
+    "npm-shrinkwrap.json",
     "CONTRIBUTING.md",
     "LICENSE",
     "README.md",

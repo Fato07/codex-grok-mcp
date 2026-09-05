@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
-import { constants as fsConstants, type Stats } from "node:fs";
+import { constants as fsConstants, realpathSync, statSync, type Stats } from "node:fs";
 import {
   chmod,
   link,
@@ -10,7 +10,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const PAIR_CODE_PREFIX = "CGM2_";
 const PAIR_CODE_VERSION = 2;
@@ -334,14 +334,63 @@ export function defaultBridgeConfigPath(
   return join(root, "codex-grok-mcp", "bridge.json");
 }
 
+function canonicalPathForUse(path: string): string {
+  let cursor = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync(cursor), ...missing);
+    } catch (error) {
+      if (!(isNodeError(error) && error.code === "ENOENT")) fail("invalid_config_file");
+      const parent = dirname(cursor);
+      if (parent === cursor) fail("invalid_config_file");
+      missing.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+export function canonicalBridgeConfigPath(path: string): string {
+  const absolute = resolve(path);
+  return join(canonicalPathForUse(dirname(absolute)), basename(absolute));
+}
+
+function validateTrustedDirectoryChain(path: string, uid: number): void {
+  let cursor = realpathSync(path);
+  while (true) {
+    const details = statSync(cursor);
+    const mode = details.mode & 0o7777;
+    const trustedOwner = details.uid === uid || details.uid === 0;
+    const writable = (mode & 0o022) !== 0;
+    if (
+      !details.isDirectory() ||
+      !trustedOwner ||
+      (writable && ((mode & 0o1000) === 0 || details.uid !== 0))
+    ) {
+      fail("insecure_config_directory");
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+}
+
 async function ensurePrivateParent(path: string): Promise<void> {
   const parent = dirname(path);
   try {
+    if (typeof process.getuid !== "function") fail("insecure_config_directory");
+    const uid = process.getuid();
     await mkdir(parent, { recursive: true, mode: 0o700 });
     const details = await lstat(parent);
-    if (details.isSymbolicLink() || !details.isDirectory() || (details.mode & 0o777) !== 0o700) {
+    if (
+      details.isSymbolicLink() ||
+      !details.isDirectory() ||
+      details.uid !== uid ||
+      (details.mode & 0o777) !== 0o700
+    ) {
       fail("insecure_config_directory");
     }
+    validateTrustedDirectoryChain(parent, uid);
   } catch (error) {
     if (error instanceof BridgePairingError) throw error;
     fail("config_save_failed");
@@ -357,6 +406,7 @@ export async function savePairingConfig(
   path = defaultBridgeConfigPath(),
   options: SaveOptions = {},
 ): Promise<void> {
+  path = canonicalBridgeConfigPath(path);
   const config = normalizeConfig(configValue);
   await ensurePrivateParent(path);
   const temporaryPath = join(
@@ -409,6 +459,7 @@ function isPrivateConfigFile(details: Stats, uid: number): boolean {
 export async function loadPairingConfigSnapshot(
   path = defaultBridgeConfigPath(),
 ): Promise<PairingConfigSnapshot> {
+  path = canonicalBridgeConfigPath(path);
   try {
     if (typeof process.getuid !== "function") fail("invalid_config_file");
     const uid = process.getuid();
@@ -480,6 +531,7 @@ export async function loadPairingConfig(path = defaultBridgeConfigPath()): Promi
 export async function loadOptionalPairingConfig(
   path = defaultBridgeConfigPath(),
 ): Promise<PairingConfig | undefined> {
+  path = canonicalBridgeConfigPath(path);
   try {
     await lstat(path);
   } catch (error) {
@@ -490,6 +542,7 @@ export async function loadOptionalPairingConfig(
 }
 
 export async function removePairingConfig(path = defaultBridgeConfigPath()): Promise<boolean> {
+  path = canonicalBridgeConfigPath(path);
   try {
     const details = await lstat(path);
     if (!details.isFile() && !details.isSymbolicLink()) fail("invalid_config_file");

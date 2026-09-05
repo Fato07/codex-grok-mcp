@@ -21,7 +21,7 @@ An unofficial, local-first bridge that lets Codex ask Grok once or collaborate w
 |---|---|
 | Isolated Grok CLI call | Stable; live-tested on macOS |
 | Persistent Grok Bot collaboration: list, read, wait, and exact-ID send | Experimental; live operator smoke test passed |
-| Companion lifecycle | Included; Linux CI and live lifecycle acceptance passed |
+| Companion lifecycle | Exact managed lifecycle for the Linux Grok Bot VM; stable release is gated by CI, clean-room, and soak evidence |
 | Linux isolated CLI path | Unverified |
 | Windows, WSL, and Codex cloud | Unsupported or unverified |
 
@@ -180,7 +180,11 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
 
 `install` is the bootstrap command. If an interrupted foreground companion left a lease behind, `install` reclaims only a private foreground lease whose recorded process is repeatedly proven gone. Active or unknown foreground leases, malformed leases, and managed mismatches still fail closed. An exact active managed candidate may be adopted.
 
-Lifecycle staging repacks the currently invoked package with lifecycle scripts disabled, verifies its SHA-512 identity, and installs those exact package bytes. It does not resolve the connector package a second time. This keeps an immutable npm version reproducible and lets maintainers test a verified local release tarball before publication.
+When migrating pre-binding beta state, the exact managed process must still be active so its release directory can be verified. A stale pre-binding managed lease cannot prove which copied root it belonged to; restart the prior exact beta first, then run the stable lifecycle command.
+
+Lifecycle staging repacks the currently invoked package with lifecycle scripts disabled and verifies its SHA-512 identity. The published `npm-shrinkwrap.json` pins the production dependency closure, and staging rejects any installed dependency version or integrity that differs from it. The connector package itself is never resolved a second time.
+
+A private two-sided binding keeps one canonical lifecycle root attached to one pairing config. It also remembers every replay and Grok data root used by that installation, so uninstall cannot remove them after environment paths change. Keep the same `XDG_CONFIG_HOME` and `XDG_DATA_HOME` for every lifecycle command.
 
 `status`, `start`, `stop`, `ensure`, and `uninstall` are idempotent. `ensure` repairs an existing managed installation. It never creates the first installation or downloads another version. `restart` intentionally performs a fresh cycle:
 
@@ -238,7 +242,7 @@ Reads return sanitized text only. Attachments and other non-text transcript entr
 | `GROK_MCP_AUTH_PATH` | `~/.grok/auth.json` | Operator-owned auth file |
 | `CODEX_GROK_RELAY_TOKEN` | none | Required only by the local `pair` command |
 
-The plugin passes only these connector options. Pairing is stored in a private mode-`0600` local file and is never accepted as MCP tool input.
+The plugin passes only these connector options. Pairing is stored in a private mode-`0600` local file and is never accepted as MCP tool input. The manifest also permits `NPM_CONFIG_CACHE`, `NPM_CONFIG_OFFLINE`, `NPM_CONFIG_REGISTRY`, and `NPM_CONFIG_REPLACE_REGISTRY_HOST` for the maintainer's isolated prepublication test; ordinary installs should leave them unset.
 
 ## Troubleshooting
 
@@ -247,13 +251,18 @@ The plugin passes only these connector options. Pairing is stored in a private m
 - **`UPGRADE_REQUIRED`:** stop and restart the VM companion with the same package version as the connector.
 - **`DATA_ROOT_SYMLINK`:** set `SAND_DATA_ROOT` to the real Grok Bot data directory, not a symlink. The companion rejects symlinked descriptor parents.
 - **`companion_lease_stale`:** run the exact pinned `install` command when no managed version is installed. It can reclaim only a strictly revalidated dead foreground lease. Use `ensure` only after managed installation. Do not delete the lease manually.
+- **`companion_lease_recovery_required`:** an interrupted lease mutation left a private hard-link claim. Stop every old and new companion or lifecycle command. Do not start another companion, delete pairing, or remove the canonical `.lock`. An operator may remove only the matching `.claim` after independently proving that no lifecycle or companion process is running; otherwise fail closed and report the incident.
+- **`lifecycle_root_conflict`:** the config and lifecycle root do not own each other. Retry with the original `XDG_CONFIG_HOME` and `XDG_DATA_HOME`; do not delete either binding to force adoption.
+- **`uninstall_incomplete`:** cleanup stopped safely while its ownership bindings were retained. Retry the exact `uninstall` command with the same config and data roots.
 - **Uncertain send:** inspect the Bot before considering any new action. A retry may duplicate a message.
+
+Do not run lifecycle mutations from two connector versions at once. Finish or stop the older command before starting the exact replacement.
 
 When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, and connector versions. Never attach authentication files, pairing codes, gateway/relay tokens, prompts, responses, transcripts, or private paths.
 
 ## Uninstall
 
-1. Press `Ctrl-C` for a foreground VM companion. For a managed lifecycle install, run `uninstall`; it stops the exact managed process and removes only the private managed release store and lifecycle state. It preserves pairing and replay protection for the explicit steps that follow.
+1. Press `Ctrl-C` for a foreground VM companion. For a managed lifecycle install, run `uninstall`; it stops the exact managed process and removes only the private managed release store, lifecycle state, and paired ownership bindings. It preserves pairing, Grok data, and replay protection for the explicit steps that follow.
 
    ```bash
    npx --yes --package=codex-grok-mcp@0.2.0 -- codex-grok-bridge uninstall

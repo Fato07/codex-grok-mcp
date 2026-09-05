@@ -9,11 +9,13 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - Stable local MCP access for isolated Grok calls and opt-in collaboration with named Bots already running inside Grok Bot.
 - Exact-version managed companion install, status, start, stop, ensure, restart, update, retry-safe rollback, and pairing-preserving uninstall.
 - Exact-artifact lifecycle staging from the currently invoked package, avoiding a second package-version resolution during install or update.
+- Published npm shrinkwrap enforcement for the complete production dependency closure.
 
 ### Security
 
 - End-to-end encrypted paired transport with bounded reads, exact-ID sends, replay protection, strict local gateway validation, and no automatic retry after an uncertain write.
 - Pairing-preserving lifecycle cutovers with candidate preflight, private state, exact process identity, and fail-closed stale recovery.
+- Paired config/root ownership records, persisted protected data roots, maintenance-lease uninstall exclusion, and hard-link lease claims that prevent stale cleanup from displacing a new owner.
 
 ### Verified boundaries
 
