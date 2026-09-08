@@ -365,10 +365,40 @@ function currentUid(): number {
   return process.getuid();
 }
 
-async function ensurePrivateDirectory(path: string): Promise<void> {
+async function ensurePrivateDirectory(path: string, tightenOwnedMode = false): Promise<void> {
   try {
     await mkdir(path, { recursive: true, mode: 0o700 });
-    const details = await lstat(path);
+    let details = await lstat(path);
+    if (
+      tightenOwnedMode &&
+      !details.isSymbolicLink() &&
+      details.isDirectory() &&
+      details.uid === currentUid() &&
+      (details.mode & 0o700) === 0o700 &&
+      (details.mode & 0o7000) === 0 &&
+      (details.mode & 0o7777) !== 0o700
+    ) {
+      await assertTrustedDirectoryChain(path, "lifecycle_state_invalid");
+      const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+      const directoryOnly =
+        typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
+      const handle = await open(path, fsConstants.O_RDONLY | noFollow | directoryOnly);
+      try {
+        const opened = await handle.stat();
+        if (
+          opened.dev !== details.dev ||
+          opened.ino !== details.ino ||
+          !opened.isDirectory() ||
+          opened.uid !== currentUid()
+        ) {
+          fail("lifecycle_state_invalid");
+        }
+        await handle.chmod(0o700);
+      } finally {
+        await handle.close();
+      }
+      details = await lstat(path);
+    }
     if (
       details.isSymbolicLink() ||
       !details.isDirectory() ||
@@ -1798,7 +1828,7 @@ export class BridgeLifecycle {
     if (command !== "status") {
       await assertRemovalPreserves(join(this.#root, "releases"), this.#baseProtectedPaths);
     }
-    await ensurePrivateDirectory(this.#root);
+    await ensurePrivateDirectory(this.#root, true);
     await assertTrustedDirectoryChain(this.#root, "lifecycle_state_invalid");
     if (command === "status") {
       await this.#validatedBindingForStatus();

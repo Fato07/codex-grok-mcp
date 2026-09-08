@@ -265,6 +265,45 @@ test("managed lifecycle is idempotent and preserves exact current/previous relea
   assert.equal(result.changed, true);
 });
 
+test("status tightens a legacy owned lifecycle root", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await chmod(root, 0o755);
+
+  const { lifecycle } = harness(root);
+  assert.equal((await lifecycle.run("status")).state, "not_installed");
+  assert.equal((await lstat(root)).mode & 0o7777, 0o700);
+});
+
+test("status does not broaden a restrictive lifecycle root", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(async () => {
+    await chmod(root, 0o700);
+    await rm(root, { recursive: true, force: true });
+  });
+  await chmod(root, 0o500);
+
+  const { lifecycle } = harness(root);
+  await assert.rejects(lifecycle.run("status"), { message: "lifecycle_state_invalid" });
+  assert.equal((await lstat(root)).mode & 0o7777, 0o500);
+});
+
+test("status never follows a lifecycle root symlink while tightening", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  const target = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-target-"));
+  context.after(async () => {
+    await rm(parent, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  });
+  await chmod(target, 0o755);
+  const root = join(parent, "root");
+  await symlink(target, root, "dir");
+
+  const { lifecycle } = harness(root);
+  await assert.rejects(lifecycle.run("status"), { message: "lifecycle_state_invalid" });
+  assert.equal((await lstat(target)).mode & 0o7777, 0o755);
+});
+
 test("uninstall stops only the managed companion and removes only managed lifecycle data", async (context) => {
   const parent = await mkdtemp(join(tmpdir(), "codex-grok-uninstall-"));
   context.after(() => rm(parent, { recursive: true, force: true }));
