@@ -1796,6 +1796,7 @@ async function acquireLifecycleControl(controlPath: string): Promise<CompanionLe
 export class BridgeLifecycle {
   readonly #root: string;
   readonly #configPath: string;
+  readonly #repairDefaultConfigParent: boolean;
   readonly #currentReplayRoot: string;
   readonly #currentGrokDataRoot: string;
   readonly #baseProtectedPaths: string[];
@@ -1807,6 +1808,8 @@ export class BridgeLifecycle {
     }
     this.#root = canonicalChildPath(options.root ?? defaultLifecycleRoot());
     this.#configPath = canonicalChildPath(options.configPath ?? defaultBridgeConfigPath());
+    this.#repairDefaultConfigParent =
+      this.#configPath === canonicalChildPath(defaultBridgeConfigPath());
     this.#currentReplayRoot = resolve(defaultReplayRoot());
     this.#currentGrokDataRoot = resolve(grokBotDataRoot());
     this.#baseProtectedPaths = [
@@ -1829,6 +1832,9 @@ export class BridgeLifecycle {
       await assertRemovalPreserves(join(this.#root, "releases"), this.#baseProtectedPaths);
     }
     await ensurePrivateDirectory(this.#root, true);
+    if (this.#repairDefaultConfigParent) {
+      await ensurePrivateDirectory(dirname(this.#configPath), true);
+    }
     await assertTrustedDirectoryChain(this.#root, "lifecycle_state_invalid");
     if (command === "status") {
       await this.#validatedBindingForStatus();

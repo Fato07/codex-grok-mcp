@@ -304,6 +304,40 @@ test("status never follows a lifecycle root symlink while tightening", async (co
   assert.equal((await lstat(target)).mode & 0o7777, 0o755);
 });
 
+test("default lifecycle tightens a legacy owned config directory", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-config-mode-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const configHome = join(parent, "config");
+  const configDirectory = join(configHome, "codex-grok-mcp");
+  await mkdir(configDirectory, { recursive: true, mode: 0o755 });
+  const environment = {
+    ...process.env,
+    XDG_CONFIG_HOME: configHome,
+    XDG_DATA_HOME: join(parent, "data"),
+    XDG_STATE_HOME: join(parent, "state"),
+    SAND_DATA_ROOT: join(parent, "sand-data"),
+  };
+  delete environment.SAND_USER_DATA_DIR;
+
+  const result = await runDefaultLifecycle("uninstall", environment);
+  assert.deepEqual(result, {
+    code: 0,
+    result: { ok: true, state: "not_installed" },
+  });
+  assert.equal((await lstat(configDirectory)).mode & 0o7777, 0o700);
+});
+
+test("lifecycle never changes an explicit config directory", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configDirectory = join(root, "custom-config");
+  await mkdir(configDirectory, { mode: 0o755 });
+
+  const { lifecycle } = harness(root, join(configDirectory, "bridge.json"));
+  await assert.rejects(lifecycle.run("uninstall"), { message: "companion_lease_invalid" });
+  assert.equal((await lstat(configDirectory)).mode & 0o7777, 0o755);
+});
+
 test("uninstall stops only the managed companion and removes only managed lifecycle data", async (context) => {
   const parent = await mkdtemp(join(tmpdir(), "codex-grok-uninstall-"));
   context.after(() => rm(parent, { recursive: true, force: true }));
