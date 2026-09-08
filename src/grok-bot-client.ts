@@ -166,7 +166,7 @@ function readPort(value: string | undefined): number | undefined {
   return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
 }
 
-function sandRoot(env: NodeJS.ProcessEnv): string {
+export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {
   if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
     return env.SAND_DATA_ROOT;
   }
@@ -346,7 +346,7 @@ function parseLoopbackUrl(value: string): URL {
 
 function resolveGateway(options: ClientOptions): ResolvedGateway {
   const env = options.env ?? process.env;
-  const file = readDiscovery(options.discoveryPath ?? join(sandRoot(env), "gateway.json"));
+  const file = readDiscovery(options.discoveryPath ?? join(grokBotDataRoot(env), "gateway.json"));
   const override = env.GROKBOT_GATEWAY_URL?.trim() || env.SAND_GATEWAY_URL?.trim();
   const url = override === undefined || override === "" ? undefined : parseLoopbackUrl(override);
   const hostValue =

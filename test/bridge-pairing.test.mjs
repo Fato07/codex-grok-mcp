@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { chmod, link, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,6 +26,7 @@ import {
   savePairingConfig,
   validateRelayUrl,
 } from "../dist/bridge-pairing.js";
+import { companionLeasePath } from "../dist/bridge-runtime.js";
 
 test("pair code and authenticated frames round-trip without shell-sensitive characters", () => {
   const masterToken = generateRelayAccessToken();
@@ -149,4 +160,36 @@ test("config loading rejects unsafe file identities and oversized files", async 
   const oversizedPath = join(root, "bridge-oversized.json");
   await writeFile(oversizedPath, Buffer.alloc(8 * 1024 + 1), { mode: 0o600 });
   await assert.rejects(loadPairingConfig(oversizedPath), { message: "invalid_config_file" });
+});
+
+test("config parent aliases converge on one pairing file and companion lease", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-pairing-alias-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const realParent = join(root, "real");
+  const aliasParent = join(root, "alias");
+  await mkdir(realParent, { mode: 0o700 });
+  await symlink(realParent, aliasParent, "dir");
+  const aliasPath = join(aliasParent, "bridge.json");
+  const realPath = join(await realpath(realParent), "bridge.json");
+  const config = parsePairCode(generatePairCode("wss://relay.example.test/socket"));
+
+  await savePairingConfig(config, aliasPath);
+  assert.deepEqual(await loadPairingConfig(aliasPath), config);
+  assert.deepEqual(await loadPairingConfig(realPath), config);
+  assert.equal(companionLeasePath(aliasPath), `${realPath}.lock`);
+  assert.equal(companionLeasePath(realPath), `${realPath}.lock`);
+});
+
+test("config save rejects a current-user sticky writable ancestor", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-pairing-ancestor-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const unsafeAncestor = join(root, "unsafe");
+  await mkdir(unsafeAncestor, { mode: 0o700 });
+  await chmod(unsafeAncestor, 0o1777);
+  const config = parsePairCode(generatePairCode("wss://relay.example.test/socket"));
+
+  await assert.rejects(
+    savePairingConfig(config, join(unsafeAncestor, "private", "bridge.json")),
+    { message: "insecure_config_directory" },
+  );
 });

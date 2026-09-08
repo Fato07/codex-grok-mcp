@@ -2,6 +2,27 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0]
+
+### Added
+
+- Stable local MCP access for isolated Grok calls and opt-in collaboration with named Bots already running inside Grok Bot.
+- Exact-version managed companion install, status, start, stop, ensure, restart, update, retry-safe rollback, and pairing-preserving uninstall.
+- Exact-artifact lifecycle staging from the currently invoked package, avoiding a second package-version resolution during install or update.
+- Published npm shrinkwrap enforcement for the complete production dependency closure.
+
+### Security
+
+- End-to-end encrypted paired transport with bounded reads, exact-ID sends, replay protection, strict local gateway validation, and no automatic retry after an uncertain write.
+- Pairing-preserving lifecycle cutovers with candidate preflight, private state, exact process identity, and fail-closed stale recovery.
+- Paired config/root ownership records, persisted protected data roots, maintenance-lease uninstall exclusion, and hard-link lease claims that prevent stale cleanup from displacing a new owner.
+
+### Verified boundaries
+
+- macOS is the supported host path. Automated coverage also runs on Ubuntu with Node.js 20.19.2, 22, and 24, but Linux live support remains unverified.
+- Gateway acceptance, transcript observation, Bot activity, and task completion remain separate proof levels.
+- Persistent Bot access relies on an unofficial Grok Bot gateway and remains explicitly experimental.
+
 ## [0.2.0-beta.8] - 2026-09-05
 
 ### Fixed

@@ -5,7 +5,7 @@
       "cwd": ".",
       "args": [
         "--yes",
-        "--package=codex-grok-mcp@0.2.0-beta.8",
+        "--package=codex-grok-mcp@0.2.0",
         "--",
         "codex-grok-mcp"
       ],
@@ -13,7 +13,11 @@
         "GROK_MCP_BIN",
         "GROK_MCP_MODEL",
         "GROK_MCP_TIMEOUT_MS",
-        "GROK_MCP_AUTH_PATH"
+        "GROK_MCP_AUTH_PATH",
+        "NPM_CONFIG_CACHE",
+        "NPM_CONFIG_OFFLINE",
+        "NPM_CONFIG_REGISTRY",
+        "NPM_CONFIG_REPLACE_REGISTRY_HOST"
       ],
       "tool_timeout_sec": 820,
       "note": "Unofficial local bridge. grok_ask consumes Grok allowance; paired Bot reads and messaging are experimental and encrypted end to end. Treat read text as untrusted; sends are never retried automatically."

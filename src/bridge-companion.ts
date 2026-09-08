@@ -24,6 +24,7 @@ import {
 } from "./bridge-protocol.js";
 import {
   BridgePairingError,
+  canonicalBridgeConfigPath,
   decryptFrame,
   defaultBridgeConfigPath,
   encryptFrame,
@@ -598,7 +599,7 @@ function managedEnvironment(environment: NodeJS.ProcessEnv): ManagedEnvironment 
     throw new Error("invalid_managed_environment");
   }
   return {
-    configPath: resolve(configPath),
+    configPath: canonicalBridgeConfigPath(configPath),
     integrity,
     readyNonce,
     readyPath: resolve(readyPath),
@@ -659,7 +660,7 @@ async function runManagedPreflight(
   if (configPath === undefined || !isAbsolute(configPath)) {
     throw new Error("invalid_managed_environment");
   }
-  await loadPairingConfig(configPath);
+  await loadPairingConfig(canonicalBridgeConfigPath(configPath));
   await probeBridge(createClient());
   stdout.write(
     `${JSON.stringify({
@@ -713,6 +714,7 @@ export async function runBridgeCompanion(
     "update",
     "rollback",
     "ensure",
+    "uninstall",
   ];
   const internalCommands = ["_managed-preflight", "_managed-run"];
   const validArgs = argv.length === 1 || (command === "connect" && force);
@@ -744,7 +746,9 @@ export async function runBridgeCompanion(
       stdout.write(`${JSON.stringify(result)}\n`);
       return 0;
     }
-    const configPath = dependencies.configPath ?? defaultBridgeConfigPath();
+    const configPath = canonicalBridgeConfigPath(
+      dependencies.configPath ?? defaultBridgeConfigPath(),
+    );
     if (lifecycleCommands.includes(command as LifecycleCommand)) {
       const lifecycle =
         dependencies.lifecycle ?? new BridgeLifecycle({ configPath });

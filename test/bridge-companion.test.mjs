@@ -163,6 +163,7 @@ test("companion routes the bounded lifecycle surface without touching pairing", 
     "update",
     "rollback",
     "ensure",
+    "uninstall",
   ];
   const calls = [];
   for (const command of commands) {

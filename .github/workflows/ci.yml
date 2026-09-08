@@ -32,6 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             package-lock.json
+            npm-shrinkwrap.json
             relay/package-lock.json
 
       - run: npm ci --no-audit
@@ -53,4 +54,14 @@ jobs:
 
       - name: Inspect package contents
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22
-        run: npm pack --dry-run
+        run: |
+          cmp package-lock.json npm-shrinkwrap.json
+          npm pack --dry-run --json | node --input-type=module -e '
+            const chunks = [];
+            for await (const chunk of process.stdin) chunks.push(chunk);
+            const packs = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            if (
+              packs.length !== 1 ||
+              !packs[0].files?.some(({ path }) => path === "npm-shrinkwrap.json")
+            ) process.exit(1);
+          '

@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { constants as fsConstants, readFileSync, statSync } from "node:fs";
-import { lstat, mkdir, open, unlink } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { constants as fsConstants, readFileSync, realpathSync, statSync } from "node:fs";
+import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 const LEASE_VERSION = 1;
 const MANAGED_LEASE_VERSION = 2;
+const MAINTENANCE_LEASE_VERSION = 3;
 const MAX_LEASE_BYTES = 1_024;
 
 type LegacyLeaseRecord = {
@@ -26,7 +27,16 @@ type ManagedLeaseRecord = {
   release_integrity: string;
 };
 
-type LeaseRecord = LegacyLeaseRecord | ManagedLeaseRecord;
+type MaintenanceLeaseRecord = {
+  version: 3;
+  pid: number;
+  process_start_id: string | null;
+  owner_token: string;
+  binding_id: string;
+  mode: "maintenance";
+};
+
+type LeaseRecord = LegacyLeaseRecord | ManagedLeaseRecord | MaintenanceLeaseRecord;
 
 export type ManagedLeaseMetadata = {
   companionVersion: string;
@@ -35,10 +45,15 @@ export type ManagedLeaseMetadata = {
   releaseIntegrity: string;
 };
 
+export type MaintenanceLeaseMetadata = {
+  maintenanceBindingId: string;
+};
+
 export type ExpectedManagedLease = {
   companionVersion: string;
   releaseIntegrity: string;
   launchToken?: string;
+  releaseDirectory?: string;
 };
 
 export type CompanionLeaseStatus =
@@ -63,6 +78,7 @@ export class BridgeRuntimeError extends Error {
     | "companion_already_running"
     | "companion_identity_unavailable"
     | "companion_lease_invalid"
+    | "companion_lease_recovery_required"
     | "companion_lease_stale"
     | "companion_not_managed"
     | "companion_not_running"
@@ -73,6 +89,7 @@ export class BridgeRuntimeError extends Error {
       | "companion_already_running"
       | "companion_identity_unavailable"
       | "companion_lease_invalid"
+      | "companion_lease_recovery_required"
       | "companion_lease_stale"
       | "companion_not_managed"
       | "companion_not_running"
@@ -89,6 +106,7 @@ function fail(
     | "companion_already_running"
     | "companion_identity_unavailable"
     | "companion_lease_invalid"
+    | "companion_lease_recovery_required"
     | "companion_lease_stale"
     | "companion_not_managed"
     | "companion_not_running"
@@ -101,6 +119,22 @@ function isNodeError(caught: unknown): caught is NodeJS.ErrnoException {
   return caught instanceof Error && "code" in caught;
 }
 
+function canonicalPathForUse(path: string): string {
+  let cursor = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync(cursor), ...missing);
+    } catch (caught) {
+      if (!(isNodeError(caught) && caught.code === "ENOENT")) fail();
+      const parent = dirname(cursor);
+      if (parent === cursor) fail();
+      missing.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
 function currentUid(): number {
   if (typeof process.getuid !== "function") fail();
   return process.getuid();
@@ -111,6 +145,10 @@ function sameFile(
   right: { dev: number; ino: number },
 ): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameLeaseFile(left: LeaseSnapshot, right: LeaseSnapshot): boolean {
+  return left.device === right.device && left.inode === right.inode;
 }
 
 function canonicalToken(value: string): boolean {
@@ -190,6 +228,24 @@ function parseLeaseRecord(contents: string): LeaseRecord {
     return record as LegacyLeaseRecord;
   }
 
+  if (record.version === MAINTENANCE_LEASE_VERSION) {
+    if (
+      keys.length !== 6 ||
+      keys[0] !== "binding_id" ||
+      keys[1] !== "mode" ||
+      keys[2] !== "owner_token" ||
+      keys[3] !== "pid" ||
+      keys[4] !== "process_start_id" ||
+      keys[5] !== "version" ||
+      record.mode !== "maintenance" ||
+      typeof record.binding_id !== "string" ||
+      !canonicalToken(record.binding_id)
+    ) {
+      fail();
+    }
+    return record as MaintenanceLeaseRecord;
+  }
+
   if (
     record.version !== MANAGED_LEASE_VERSION ||
     keys.length !== 9 ||
@@ -265,6 +321,21 @@ function managedProcessIsExact(record: ManagedLeaseRecord): boolean {
   }
 }
 
+function managedProcessUsesRelease(
+  record: ManagedLeaseRecord,
+  releaseDirectory: string,
+): boolean {
+  if (!managedProcessIsExact(record)) return false;
+  try {
+    return (
+      realpathSync(`/proc/${record.pid}/cwd`) ===
+      realpathSync(resolve(releaseDirectory))
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function ensurePrivateParent(path: string): Promise<void> {
   const parent = dirname(path);
   try {
@@ -287,13 +358,33 @@ async function validatePrivateParent(path: string): Promise<void> {
     ) {
       fail();
     }
+    let cursor = realpathSync(dirname(path));
+    while (true) {
+      const ancestor = statSync(cursor);
+      const mode = ancestor.mode & 0o7777;
+      const trustedOwner = ancestor.uid === currentUid() || ancestor.uid === 0;
+      const writable = (mode & 0o022) !== 0;
+      if (
+        !ancestor.isDirectory() ||
+        !trustedOwner ||
+        (writable && ((mode & 0o1000) === 0 || ancestor.uid !== 0))
+      ) {
+        fail();
+      }
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
   } catch (caught) {
     if (caught instanceof BridgeRuntimeError) throw caught;
     fail();
   }
 }
 
-async function readLease(path: string): Promise<LeaseSnapshot> {
+async function readLease(
+  path: string,
+  allowedLinkCounts: readonly number[] = [1],
+): Promise<LeaseSnapshot> {
   let handle;
   try {
     const pathDetails = await lstat(path);
@@ -302,7 +393,7 @@ async function readLease(path: string): Promise<LeaseSnapshot> {
       !pathDetails.isFile() ||
       (pathDetails.mode & 0o7777) !== 0o600 ||
       pathDetails.uid !== currentUid() ||
-      pathDetails.nlink !== 1 ||
+      !allowedLinkCounts.includes(pathDetails.nlink) ||
       pathDetails.size <= 0 ||
       pathDetails.size > MAX_LEASE_BYTES
     ) {
@@ -315,7 +406,7 @@ async function readLease(path: string): Promise<LeaseSnapshot> {
       !details.isFile() ||
       (details.mode & 0o7777) !== 0o600 ||
       details.uid !== currentUid() ||
-      details.nlink !== 1 ||
+      !allowedLinkCounts.includes(details.nlink) ||
       details.size <= 0 ||
       details.size > MAX_LEASE_BYTES
     ) {
@@ -338,12 +429,74 @@ async function readLease(path: string): Promise<LeaseSnapshot> {
 }
 
 export function companionLeasePath(configPath: string): string {
-  return `${resolve(configPath)}.lock`;
+  const absolute = resolve(configPath);
+  const canonical = join(canonicalPathForUse(dirname(absolute)), basename(absolute));
+  return `${canonical}.lock`;
+}
+
+function leaseClaimPath(path: string): string {
+  return `${path}.claim`;
+}
+
+async function assertLeaseClaimAbsent(path: string): Promise<void> {
+  try {
+    await lstat(leaseClaimPath(path));
+    fail("companion_lease_recovery_required");
+  } catch (caught) {
+    if (isNodeError(caught) && caught.code === "ENOENT") return;
+    if (caught instanceof BridgeRuntimeError) throw caught;
+    fail();
+  }
+}
+
+async function claimLeasePath(path: string, snapshot: LeaseSnapshot): Promise<string> {
+  const claimPath = leaseClaimPath(path);
+  try {
+    await link(path, claimPath);
+  } catch (caught) {
+    if (isNodeError(caught) && caught.code === "EEXIST") {
+      fail("companion_lease_recovery_required");
+    }
+    fail("companion_identity_unavailable");
+  }
+  try {
+    const [current, claim] = await Promise.all([
+      readLease(path, [2]),
+      readLease(claimPath, [2]),
+    ]);
+    if (
+      !sameLeaseFile(current, snapshot) ||
+      !sameLeaseFile(claim, snapshot) ||
+      current.record.owner_token !== snapshot.record.owner_token ||
+      claim.record.owner_token !== snapshot.record.owner_token
+    ) {
+      fail("companion_identity_unavailable");
+    }
+    return claimPath;
+  } catch (caught) {
+    await unlink(claimPath).catch(() => undefined);
+    if (caught instanceof BridgeRuntimeError) throw caught;
+    fail("companion_identity_unavailable");
+  }
+}
+
+async function removeClaimedLease(path: string, claimPath: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch {
+    await unlink(claimPath).catch(() => undefined);
+    fail("companion_identity_unavailable");
+  }
+  try {
+    await unlink(claimPath);
+  } catch {
+    fail("companion_lease_recovery_required");
+  }
 }
 
 function publicStatus(record: LeaseRecord): Exclude<CompanionLeaseStatus, { state: "stopped" }> {
   const state = processState(record);
-  if (record.version === LEASE_VERSION) return { state, managed: false };
+  if (record.version !== MANAGED_LEASE_VERSION) return { state, managed: false };
   return {
     state,
     managed: true,
@@ -358,15 +511,20 @@ export async function inspectCompanionLease(
 ): Promise<CompanionLeaseStatus> {
   const path = companionLeasePath(configPath);
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assertLeaseClaimAbsent(path);
     try {
       return publicStatus((await readLease(path)).record);
     } catch (caught) {
-      if (isNodeError(caught) && caught.code === "ENOENT") return { state: "stopped" };
+      if (isNodeError(caught) && caught.code === "ENOENT") {
+        await assertLeaseClaimAbsent(path);
+        return { state: "stopped" };
+      }
       if (
         caught instanceof BridgeRuntimeError &&
         caught.code === "companion_lease_invalid" &&
         attempt === 0
       ) {
+        await assertLeaseClaimAbsent(path);
         continue;
       }
       if (caught instanceof BridgeRuntimeError) throw caught;
@@ -376,8 +534,12 @@ export async function inspectCompanionLease(
   fail();
 }
 
-export async function stopManagedCompanion(configPath: string): Promise<void> {
+export async function stopManagedCompanion(
+  configPath: string,
+  expected?: ExpectedManagedLease,
+): Promise<void> {
   const path = companionLeasePath(configPath);
+  await assertLeaseClaimAbsent(path);
   let snapshot: LeaseSnapshot;
   try {
     snapshot = await readLease(path);
@@ -387,6 +549,9 @@ export async function stopManagedCompanion(configPath: string): Promise<void> {
     fail();
   }
   if (snapshot.record.version !== MANAGED_LEASE_VERSION) fail("companion_not_managed");
+  if (!matchesManagedExpected(snapshot.record, expected)) {
+    fail("companion_identity_unavailable");
+  }
   if (!managedProcessIsExact(snapshot.record)) {
     const state = processState(snapshot.record);
     fail(state === "stale" ? "companion_lease_stale" : "companion_identity_unavailable");
@@ -397,6 +562,7 @@ export async function stopManagedCompanion(configPath: string): Promise<void> {
     current.inode !== snapshot.inode ||
     current.record.version !== MANAGED_LEASE_VERSION ||
     current.record.owner_token !== snapshot.record.owner_token ||
+    !matchesManagedExpected(current.record, expected) ||
     !managedProcessIsExact(current.record)
   ) {
     fail("companion_identity_unavailable");
@@ -408,6 +574,28 @@ export async function stopManagedCompanion(configPath: string): Promise<void> {
   }
 }
 
+export async function managedCompanionMatches(
+  configPath: string,
+  expected: ExpectedManagedLease,
+): Promise<boolean> {
+  const path = companionLeasePath(configPath);
+  await assertLeaseClaimAbsent(path);
+  let snapshot: LeaseSnapshot;
+  try {
+    snapshot = await readLease(path);
+  } catch (caught) {
+    if (isNodeError(caught) && caught.code === "ENOENT") return false;
+    if (caught instanceof BridgeRuntimeError) throw caught;
+    fail();
+  }
+  return (
+    snapshot.record.version === MANAGED_LEASE_VERSION &&
+    processState(snapshot.record) === "active" &&
+    matchesManagedExpected(snapshot.record, expected) &&
+    managedProcessIsExact(snapshot.record)
+  );
+}
+
 function matchesManagedExpected(
   record: LeaseRecord,
   expected: ExpectedManagedLease | undefined,
@@ -417,7 +605,9 @@ function matchesManagedExpected(
     record.version === MANAGED_LEASE_VERSION &&
     record.companion_version === expected.companionVersion &&
     record.release_integrity === expected.releaseIntegrity &&
-    (expected.launchToken === undefined || record.launch_token === expected.launchToken)
+    (expected.launchToken === undefined || record.launch_token === expected.launchToken) &&
+    (expected.releaseDirectory === undefined ||
+      managedProcessUsesRelease(record, expected.releaseDirectory))
   );
 }
 
@@ -426,6 +616,7 @@ async function clearStaleLease(
   matches: (record: LeaseRecord) => boolean,
 ): Promise<boolean> {
   const path = companionLeasePath(configPath);
+  await assertLeaseClaimAbsent(path);
   let snapshot: LeaseSnapshot;
   try {
     snapshot = await readLease(path);
@@ -449,10 +640,34 @@ async function clearStaleLease(
     fail("companion_identity_unavailable");
   }
   await validatePrivateParent(path);
+  const claimPath = await claimLeasePath(path, snapshot);
   try {
-    await unlink(path);
+    const [currentClaimed, claim] = await Promise.all([
+      readLease(path, [2]),
+      readLease(claimPath, [2]),
+    ]);
+    if (
+      !sameLeaseFile(currentClaimed, snapshot) ||
+      !sameLeaseFile(claim, snapshot) ||
+      currentClaimed.record.owner_token !== snapshot.record.owner_token ||
+      claim.record.owner_token !== snapshot.record.owner_token ||
+      processState(currentClaimed.record) !== "stale" ||
+      processState(claim.record) !== "stale" ||
+      !matches(currentClaimed.record) ||
+      !matches(claim.record)
+    ) {
+      fail("companion_identity_unavailable");
+    }
+    await removeClaimedLease(path, claimPath);
     return true;
-  } catch {
+  } catch (caught) {
+    await unlink(claimPath).catch(() => undefined);
+    if (
+      caught instanceof BridgeRuntimeError &&
+      caught.code === "companion_lease_recovery_required"
+    ) {
+      throw caught;
+    }
     fail("companion_identity_unavailable");
   }
 }
@@ -462,7 +677,9 @@ export async function clearStaleCompanionLease(
   expected?: ExpectedManagedLease,
 ): Promise<boolean> {
   return await clearStaleLease(configPath, (record) =>
-    matchesManagedExpected(record, expected),
+    expected === undefined
+      ? record.version === LEASE_VERSION
+      : matchesManagedExpected(record, expected),
   );
 }
 
@@ -472,17 +689,61 @@ export async function clearStaleForegroundCompanionLease(
   return await clearStaleLease(configPath, (record) => record.version === LEASE_VERSION);
 }
 
+export async function clearStaleMaintenanceLease(
+  configPath: string,
+  bindingId: string,
+): Promise<boolean> {
+  if (!canonicalToken(bindingId)) fail();
+  const path = companionLeasePath(configPath);
+  await assertLeaseClaimAbsent(path);
+  let snapshot: LeaseSnapshot;
+  try {
+    snapshot = await readLease(path);
+  } catch (caught) {
+    if (isNodeError(caught) && caught.code === "ENOENT") return false;
+    if (caught instanceof BridgeRuntimeError) throw caught;
+    fail();
+  }
+  if (
+    snapshot.record.version !== MAINTENANCE_LEASE_VERSION ||
+    snapshot.record.binding_id !== bindingId
+  ) {
+    return false;
+  }
+  return await clearStaleLease(
+    configPath,
+    (record) =>
+      record.version === MAINTENANCE_LEASE_VERSION &&
+      record.binding_id === bindingId,
+  );
+}
+
 export async function waitForCompanionStop(
   configPath: string,
   timeoutMs: number,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let recoveryRequired = false;
   while (Date.now() < deadline) {
-    const status = await inspectCompanionLease(configPath);
+    let status: CompanionLeaseStatus;
+    try {
+      status = await inspectCompanionLease(configPath);
+    } catch (caught) {
+      if (
+        caught instanceof BridgeRuntimeError &&
+        caught.code === "companion_lease_recovery_required"
+      ) {
+        recoveryRequired = true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        continue;
+      }
+      throw caught;
+    }
     if (status.state === "stopped") return;
     if (status.state === "stale") fail("companion_lease_stale");
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  if (recoveryRequired) fail("companion_lease_recovery_required");
   fail("companion_stop_timeout");
 }
 
@@ -497,12 +758,13 @@ export class CompanionLease {
 
   static async acquire(
     configPath: string,
-    managed?: ManagedLeaseMetadata,
+    metadata?: ManagedLeaseMetadata | MaintenanceLeaseMetadata,
   ): Promise<CompanionLease> {
     const path = companionLeasePath(configPath);
     await ensurePrivateParent(path);
 
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      await assertLeaseClaimAbsent(path);
       const ownerToken = randomBytes(32).toString("base64url");
       let handle;
       try {
@@ -516,6 +778,7 @@ export class CompanionLease {
         );
       } catch (caught) {
         if (!isNodeError(caught) || caught.code !== "EEXIST") fail();
+        await assertLeaseClaimAbsent(path);
         let snapshot: LeaseSnapshot;
         try {
           snapshot = await readLease(path);
@@ -530,6 +793,14 @@ export class CompanionLease {
       }
 
       const processStartId = linuxProcessStartIdentity(process.pid) ?? null;
+      const managed =
+        metadata !== undefined && "companionVersion" in metadata
+          ? metadata
+          : undefined;
+      const maintenance =
+        metadata !== undefined && "maintenanceBindingId" in metadata
+          ? metadata
+          : undefined;
       if (managed !== undefined && processStartId === null) {
         await handle.close().catch(() => undefined);
         await unlink(path).catch(() => undefined);
@@ -546,15 +817,17 @@ export class CompanionLease {
         await unlink(path).catch(() => undefined);
         fail();
       }
+      if (
+        maintenance !== undefined &&
+        !canonicalToken(maintenance.maintenanceBindingId)
+      ) {
+        await handle.close().catch(() => undefined);
+        await unlink(path).catch(() => undefined);
+        fail();
+      }
       const record: LeaseRecord =
-        managed === undefined
+        managed !== undefined
           ? {
-              version: LEASE_VERSION,
-              pid: process.pid,
-              process_start_id: processStartId,
-              owner_token: ownerToken,
-            }
-          : {
               version: MANAGED_LEASE_VERSION,
               pid: process.pid,
               process_start_id: processStartId as string,
@@ -564,7 +837,22 @@ export class CompanionLease {
               companion_version: managed.companionVersion,
               protocol_versions: [...managed.protocolVersions],
               release_integrity: managed.releaseIntegrity,
-            };
+            }
+          : maintenance !== undefined
+            ? {
+                version: MAINTENANCE_LEASE_VERSION,
+                pid: process.pid,
+                process_start_id: processStartId,
+                owner_token: ownerToken,
+                binding_id: maintenance.maintenanceBindingId,
+                mode: "maintenance",
+              }
+            : {
+                version: LEASE_VERSION,
+                pid: process.pid,
+                process_start_id: processStartId,
+                owner_token: ownerToken,
+              };
       try {
         const details = await handle.stat();
         if (
@@ -577,10 +865,29 @@ export class CompanionLease {
         }
         await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
         await handle.sync();
+        await assertLeaseClaimAbsent(path);
+        const written = await readLease(path);
+        if (
+          written.device !== details.dev ||
+          written.inode !== details.ino ||
+          written.record.owner_token !== ownerToken
+        ) {
+          fail();
+        }
         return new CompanionLease(path, ownerToken);
       } catch (caught) {
-        await handle.close().catch(() => undefined);
-        await unlink(path).catch(() => undefined);
+        try {
+          const [pathDetails, handleDetails] = await Promise.all([
+            lstat(path),
+            handle.stat(),
+          ]);
+          await assertLeaseClaimAbsent(path);
+          if (sameFile(pathDetails, handleDetails) && pathDetails.nlink === 1) {
+            await unlink(path);
+          }
+        } catch {
+          // Fail closed. A surviving lease or claim requires explicit recovery.
+        }
         if (caught instanceof BridgeRuntimeError) throw caught;
         fail();
       } finally {
@@ -591,6 +898,7 @@ export class CompanionLease {
   }
 
   async release(): Promise<void> {
+    await assertLeaseClaimAbsent(this.#path);
     const snapshot = await readLease(this.#path).catch(() => fail());
     if (snapshot.record.owner_token !== this.#ownerToken) fail();
     let current: LeaseSnapshot;
@@ -606,9 +914,29 @@ export class CompanionLease {
     ) {
       fail();
     }
+    const claimPath = await claimLeasePath(this.#path, snapshot);
     try {
-      await unlink(this.#path);
-    } catch {
+      const [currentClaimed, claim] = await Promise.all([
+        readLease(this.#path, [2]),
+        readLease(claimPath, [2]),
+      ]);
+      if (
+        !sameLeaseFile(currentClaimed, snapshot) ||
+        !sameLeaseFile(claim, snapshot) ||
+        currentClaimed.record.owner_token !== this.#ownerToken ||
+        claim.record.owner_token !== this.#ownerToken
+      ) {
+        fail();
+      }
+      await removeClaimedLease(this.#path, claimPath);
+    } catch (caught) {
+      await unlink(claimPath).catch(() => undefined);
+      if (
+        caught instanceof BridgeRuntimeError &&
+        caught.code === "companion_lease_recovery_required"
+      ) {
+        throw caught;
+      }
       fail();
     }
   }
