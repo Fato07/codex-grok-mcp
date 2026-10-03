@@ -180,7 +180,7 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
 
 `install` is the bootstrap command. If an interrupted foreground companion left a lease behind, `install` reclaims only a private foreground lease whose recorded process is repeatedly proven gone. Active or unknown foreground leases, malformed leases, and managed mismatches still fail closed. An exact active managed candidate may be adopted.
 
-When migrating pre-binding beta state, the exact managed process must still be active so its release directory can be verified. A stale pre-binding managed lease cannot prove which copied root it belonged to; restart the prior exact beta first, then run the stable lifecycle command.
+When migrating pre-binding beta state, `start`, `ensure`, `restart`, `update`, and `rollback` can recover an exact stale retained release. The lifecycle preflights that release, clears only its proven stale lease, restarts it from the requested root, verifies pairing and active ownership, and only then writes the binding pair. `stop`, `uninstall`, and mismatched releases still fail closed.
 
 Lifecycle staging repacks the currently invoked package with lifecycle scripts disabled and verifies its SHA-512 identity. The published `npm-shrinkwrap.json` pins the production dependency closure, and staging rejects any installed dependency version or integrity that differs from it. The connector package itself is never resolved a second time.
 

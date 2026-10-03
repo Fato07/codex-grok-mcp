@@ -38,7 +38,9 @@ import {
   CompanionLease,
   clearStaleCompanionLease,
   clearStaleForegroundCompanionLease,
+  companionLeasePath,
   inspectCompanionLease,
+  managedCompanionMatches,
   stopManagedCompanion,
   waitForCompanionStop,
 } from "../dist/bridge-runtime.js";
@@ -99,14 +101,23 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
   let pairing = Buffer.from("pairing-a");
   const actions = [];
   const controls = {
+    failPreflight: undefined,
     failStart: undefined,
     mutatePairingDuringPreflight: false,
+    mutatePairingDuringStart: false,
     onStop: undefined,
+    ownsResult: undefined,
     setCurrent(next) {
       current = next;
     },
     setFailStart(version, code, active = false) {
       controls.failStart = { version, code, active };
+    },
+    setFailPreflight(code) {
+      controls.failPreflight = code;
+    },
+    setOwnsResult(value) {
+      controls.ownsResult = value;
     },
     setStatus(status) {
       processStatus = status;
@@ -123,10 +134,14 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
     pairingIdentity: async () => Buffer.from(pairing),
     preflight: async (candidate) => {
       actions.push(`preflight:${candidate.version}`);
+      if (controls.failPreflight !== undefined) {
+        throw new BridgeLifecycleError(controls.failPreflight);
+      }
       if (controls.mutatePairingDuringPreflight) controls.mutatePairing();
     },
     start: async (candidate) => {
       actions.push(`start:${candidate.version}`);
+      if (controls.mutatePairingDuringStart) controls.mutatePairing();
       const failure = controls.failStart;
       if (failure?.version === candidate.version) {
         controls.failStart = undefined;
@@ -151,10 +166,11 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
     },
     inspect: async () => processStatus,
     owns: async (candidate) =>
-      processStatus.state === "active" &&
-      processStatus.managed === true &&
-      processStatus.companionVersion === candidate.version &&
-      processStatus.releaseIntegrity === candidate.integrity,
+      controls.ownsResult ??
+      (processStatus.state === "active" &&
+        processStatus.managed === true &&
+        processStatus.companionVersion === candidate.version &&
+        processStatus.releaseIntegrity === candidate.integrity),
     recoverStale: async () => {
       actions.push("recover-stale");
       processStatus = { state: "stopped" };
@@ -175,6 +191,11 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
     hooks,
     lifecycle: new BridgeLifecycle({ root, configPath, hooks }),
   };
+}
+
+async function assertBindingsAbsent(root, configPath) {
+  await assert.rejects(lstat(join(root, "binding.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle.json`), { code: "ENOENT" });
 }
 
 async function runDefaultLifecycle(command, environment) {
@@ -691,7 +712,149 @@ test("initial install recovers an exact stale managed candidate only with a root
   assert.deepEqual(other.actions, []);
 });
 
-test("a stale pre-binding managed state cannot claim unverifiable ownership", async (context) => {
+for (const command of ["start", "ensure", "restart", "update", "rollback"]) {
+  test(`${command} recovers a stale pre-binding release before proceeding`, async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-migration-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const configPath = join(root, "config", "bridge.json");
+    const { lifecycle, controls, actions } = harness(root, configPath);
+    const previous = release("0.2.0-beta.5", 1);
+    const exact = release("0.2.0-beta.6", 2);
+    const next = release("0.2.0-beta.7", 3);
+    await lifecycle.run("install");
+    controls.setCurrent(exact);
+    await lifecycle.run("update");
+    controls.setCurrent(next);
+    const stateBefore = await readFile(join(root, "state.json"), "utf8");
+    await unlink(join(root, "binding.json"));
+    await unlink(`${configPath}.lifecycle.json`);
+    controls.setStatus({
+      state: "stale",
+      managed: true,
+      companionVersion: exact.version,
+      protocolVersions: [...exact.protocol_versions],
+      releaseIntegrity: exact.integrity,
+    });
+    const before = actions.length;
+
+    const result = await lifecycle.run(command);
+    const target = command === "update" ? next : command === "rollback" ? previous : exact;
+    assert.equal(result.state, "running");
+    assert.equal(result.changed, true);
+    assert.equal(result.active_version, target.version);
+    assert.equal(
+      result.previous_version,
+      command === "update" ? exact.version : command === "rollback" ? null : previous.version,
+    );
+    assert.deepEqual(actions.slice(before), [
+      `preflight:${exact.version}`,
+      "recover-stale",
+      `start:${exact.version}`,
+      ...(target === exact ? [] : [`preflight:${target.version}`, "stop", `start:${target.version}`]),
+    ]);
+    const rootBinding = JSON.parse(await readFile(join(root, "binding.json"), "utf8"));
+    const configBinding = JSON.parse(await readFile(`${configPath}.lifecycle.json`, "utf8"));
+    assert.equal(rootBinding.binding_id, configBinding.binding_id);
+    if (target === exact) {
+      assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
+    } else {
+      const state = JSON.parse(await readFile(join(root, "state.json"), "utf8"));
+      assert.deepEqual(state.active, target);
+      assert.deepEqual(state.previous, command === "update" ? exact : null);
+    }
+  });
+}
+
+test("stale pre-binding recovery fails closed before publication", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const { lifecycle, controls, actions } = harness(root, configPath);
+  const exact = release("0.2.0-beta.5", 1);
+  await lifecycle.run("install");
+  const stateBefore = await readFile(join(root, "state.json"), "utf8");
+  await unlink(join(root, "binding.json"));
+  await unlink(`${configPath}.lifecycle.json`);
+  controls.setStatus({
+    state: "stale",
+    managed: true,
+    companionVersion: exact.version,
+    protocolVersions: [...exact.protocol_versions],
+    releaseIntegrity: exact.integrity,
+  });
+
+  actions.length = 0;
+  controls.setFailPreflight("candidate_invalid");
+  await assert.rejects(lifecycle.run("ensure"), { message: "candidate_invalid" });
+  assert.deepEqual(actions, ["preflight:0.2.0-beta.5"]);
+  await assertBindingsAbsent(root, configPath);
+
+  controls.failPreflight = undefined;
+  actions.length = 0;
+  controls.mutatePairingDuringPreflight = true;
+  await assert.rejects(lifecycle.run("ensure"), { message: "pairing_changed" });
+  assert.deepEqual(actions, ["preflight:0.2.0-beta.5"]);
+  await assertBindingsAbsent(root, configPath);
+
+  controls.mutatePairingDuringPreflight = false;
+  actions.length = 0;
+  controls.setFailStart(exact.version, "candidate_start_failed");
+  await assert.rejects(lifecycle.run("ensure"), { message: "candidate_start_failed" });
+  assert.deepEqual(actions, [
+    "preflight:0.2.0-beta.5",
+    "recover-stale",
+    "start:0.2.0-beta.5",
+  ]);
+  await assertBindingsAbsent(root, configPath);
+  assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
+});
+
+test("stale pre-binding recovery detects pairing changes during start", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const { lifecycle, controls } = harness(root, configPath);
+  const exact = release("0.2.0-beta.5", 1);
+  await lifecycle.run("install");
+  await unlink(join(root, "binding.json"));
+  await unlink(`${configPath}.lifecycle.json`);
+  controls.setStatus({
+    state: "stale",
+    managed: true,
+    companionVersion: exact.version,
+    protocolVersions: [...exact.protocol_versions],
+    releaseIntegrity: exact.integrity,
+  });
+  controls.mutatePairingDuringStart = true;
+
+  await assert.rejects(lifecycle.run("ensure"), { message: "cutover_unknown" });
+  await assertBindingsAbsent(root, configPath);
+});
+
+test("stale pre-binding recovery requires the full exact release", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const { lifecycle, controls, actions } = harness(root, configPath);
+  const exact = release("0.2.0-beta.5", 1);
+  await lifecycle.run("install");
+  await unlink(join(root, "binding.json"));
+  await unlink(`${configPath}.lifecycle.json`);
+  actions.length = 0;
+  controls.setStatus({
+    state: "stale",
+    managed: true,
+    companionVersion: exact.version,
+    protocolVersions: [1, 2, 4],
+    releaseIntegrity: exact.integrity,
+  });
+
+  await assert.rejects(lifecycle.run("ensure"), { message: "companion_not_managed" });
+  assert.deepEqual(actions, []);
+  await assertBindingsAbsent(root, configPath);
+});
+
+test("stale pre-binding recovery publishes nothing after an uncertain start", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-migration-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const configPath = join(root, "config", "bridge.json");
@@ -707,11 +870,42 @@ test("a stale pre-binding managed state cannot claim unverifiable ownership", as
     protocolVersions: [...exact.protocol_versions],
     releaseIntegrity: exact.integrity,
   });
-  const before = actions.length;
+  actions.length = 0;
+  controls.setOwnsResult(false);
 
-  await assert.rejects(lifecycle.run("ensure"), { message: "companion_not_managed" });
-  assert.deepEqual(actions.slice(before), []);
+  await assert.rejects(lifecycle.run("ensure"), { message: "cutover_unknown" });
+  assert.deepEqual(actions, [
+    "preflight:0.2.0-beta.5",
+    "recover-stale",
+    "start:0.2.0-beta.5",
+  ]);
+  await assertBindingsAbsent(root, configPath);
   assert.equal((await lstat(join(root, "state.json"))).isFile(), true);
+});
+
+test("install and teardown commands never revive a stale pre-binding release", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const { lifecycle, controls, actions } = harness(root, configPath);
+  const exact = release("0.2.0-beta.5", 1);
+  await lifecycle.run("install");
+  await unlink(join(root, "binding.json"));
+  await unlink(`${configPath}.lifecycle.json`);
+  controls.setStatus({
+    state: "stale",
+    managed: true,
+    companionVersion: exact.version,
+    protocolVersions: [...exact.protocol_versions],
+    releaseIntegrity: exact.integrity,
+  });
+  actions.length = 0;
+
+  for (const command of ["install", "stop", "uninstall"]) {
+    await assert.rejects(lifecycle.run(command), { message: "companion_not_managed" });
+  }
+  assert.deepEqual(actions, []);
+  await assertBindingsAbsent(root, configPath);
 });
 
 test("an active exact pre-binding managed candidate establishes paired ownership", async (context) => {
@@ -733,6 +927,29 @@ test("an active exact pre-binding managed candidate establishes paired ownership
     await readFile(`${configPath}.lifecycle.json`, "utf8"),
   );
   assert.equal(rootBinding.binding_id, configBinding.binding_id);
+});
+
+test("an active pre-binding release must match the full release identity", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-active-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const { lifecycle, controls, actions } = harness(root, configPath);
+  const exact = release("0.2.0-beta.5", 1);
+  await lifecycle.run("install");
+  await unlink(join(root, "binding.json"));
+  await unlink(`${configPath}.lifecycle.json`);
+  controls.setStatus({
+    state: "active",
+    managed: true,
+    companionVersion: exact.version,
+    protocolVersions: [1, 2, 4],
+    releaseIntegrity: exact.integrity,
+  });
+  actions.length = 0;
+
+  await assert.rejects(lifecycle.run("ensure"), { message: "companion_not_managed" });
+  assert.deepEqual(actions, []);
+  await assertBindingsAbsent(root, configPath);
 });
 
 test("pairing changes abort update before the running companion is stopped", async (context) => {
@@ -1465,7 +1682,7 @@ setInterval(() => {}, 1_000);
   assert.deepEqual(await inspectCompanionLease(configPath), { state: "stopped" });
 });
 
-test("Linux lifecycle performs a real detached install, update, restart, rollback, and uninstall", async (context) => {
+test("Linux lifecycle recovers a stale pre-binding process and completes upgrade and removal", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
   const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-linux-"));
   const root = join(sandbox, "lifecycle");
@@ -1602,6 +1819,57 @@ setInterval(() => {}, 1_000);
   let result = await lifecycle.run("install");
   assert.equal(result.state, "running");
   assert.equal(result.active_version, "0.2.0-beta.4");
+
+  // Only disposable fixture state is removed to reproduce a pre-binding installation.
+  await unlink(join(root, "binding.json"));
+  await unlink(`${configPath}.lifecycle.json`);
+  const stateBefore = await readFile(join(root, "state.json"), "utf8");
+  const releaseDirectory = join(
+    root,
+    "releases",
+    current.version,
+    Buffer.from(current.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  const expected = {
+    companionVersion: current.version,
+    releaseIntegrity: current.integrity,
+    releaseDirectory,
+  };
+  assert.equal(await managedCompanionMatches(configPath, expected), true);
+
+  // A copied release cannot adopt the process running from the original directory.
+  const copiedRoot = join(sandbox, "copied-lifecycle");
+  await cp(root, copiedRoot, { recursive: true });
+  await assert.rejects(new BridgeLifecycle({ root: copiedRoot, configPath }).run("ensure"), {
+    message: "companion_not_managed",
+  });
+  await assertBindingsAbsent(copiedRoot, configPath);
+
+  const lease = JSON.parse(await readFile(companionLeasePath(configPath), "utf8"));
+  assert.equal(await managedCompanionMatches(configPath, expected), true);
+  process.kill(lease.pid, "SIGKILL");
+  const deadline = Date.now() + 5_000;
+  let stopped = await inspectCompanionLease(configPath);
+  while (stopped.state === "active" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    stopped = await inspectCompanionLease(configPath);
+  }
+  assert.equal(stopped.state, "stale");
+  assert.equal(stopped.managed, true);
+
+  // Exercise the production hooks, including Linux /proc ownership and cwd checks.
+  const productionLifecycle = new BridgeLifecycle({ root, configPath });
+  result = await productionLifecycle.run("ensure");
+  assert.equal(result.state, "running");
+  assert.equal(result.changed, true);
+  assert.equal(result.active_version, current.version);
+  assert.equal(await managedCompanionMatches(configPath, expected), true);
+  assert.deepEqual((await loadPairingConfigSnapshot(configPath)).identity, beforePairing.identity);
+  assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
+  const rootBinding = JSON.parse(await readFile(join(root, "binding.json"), "utf8"));
+  const configBinding = JSON.parse(await readFile(`${configPath}.lifecycle.json`, "utf8"));
+  assert.equal(rootBinding.binding_id, configBinding.binding_id);
+  assert.equal((await productionLifecycle.run("ensure")).changed, false);
 
   current = next;
   result = await lifecycle.run("update");
