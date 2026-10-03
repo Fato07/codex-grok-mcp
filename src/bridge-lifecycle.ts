@@ -89,6 +89,11 @@ type RootLifecycleBinding = {
   grok_data_roots: string[];
 };
 
+type EnsuredLifecycleBinding = {
+  binding: RootLifecycleBinding | undefined;
+  recovered: boolean;
+};
+
 export type LifecycleResult = {
   command: LifecycleCommand;
   state:
@@ -1844,15 +1849,20 @@ export class BridgeLifecycle {
     try {
       locks.push(await acquireLifecycleControl(configControlPath(this.#configPath)));
       locks.push(await acquireLifecycleControl(join(this.#root, "lifecycle-control")));
-      const binding = await this.#ensureBinding(command);
+      const ensured = await this.#ensureBinding(command);
+      const { binding } = ensured;
       if (binding !== undefined) {
         await assertRemovalPreserves(
           join(this.#root, "releases"),
           this.#protectedPaths(binding),
         );
       }
-      const changed =
-        command === "install"
+      const recoveryCompletesCommand =
+        ensured.recovered &&
+        (command === "start" || command === "ensure" || command === "restart");
+      const commandChanged = recoveryCompletesCommand
+        ? false
+        : command === "install"
           ? await this.#install()
           : command === "start" || command === "ensure"
             ? await this.#start()
@@ -1861,10 +1871,11 @@ export class BridgeLifecycle {
               : command === "restart"
                 ? await this.#restart()
                 : command === "update"
-                ? await this.#update()
+                  ? await this.#update()
                   : command === "rollback"
                     ? await this.#rollback()
                     : await this.#uninstall(binding);
+      const changed = ensured.recovered || commandChanged;
       return await this.#result(command, changed);
     } finally {
       for (const lock of locks.reverse()) {
@@ -1940,7 +1951,8 @@ export class BridgeLifecycle {
 
   async #ensureBinding(
     command: LifecycleCommand,
-  ): Promise<RootLifecycleBinding | undefined> {
+  ): Promise<EnsuredLifecycleBinding> {
+    let recovered = false;
     let [configBinding, rootBinding] = await Promise.all([
       loadConfigBinding(this.#configPath, true),
       loadRootBinding(this.#root, true),
@@ -1951,7 +1963,10 @@ export class BridgeLifecycle {
         join(this.#root, "releases"),
         this.#protectedPaths(rootBinding),
       );
-      return await this.#extendBindingProtection(rootBinding);
+      return {
+        binding: await this.#extendBindingProtection(rootBinding),
+        recovered,
+      };
     }
 
     if (configBinding !== undefined) {
@@ -1980,30 +1995,82 @@ export class BridgeLifecycle {
         this.#protectedPaths(rootBinding),
       );
       await createPrivateJson(bindingPath(this.#configPath), requestedConfig);
-      return await this.#extendBindingProtection(rootBinding);
+      return {
+        binding: await this.#extendBindingProtection(rootBinding),
+        recovered,
+      };
     }
 
     const state = await loadState(this.#root);
     const status = await this.#hooks.inspect();
     if (state === undefined) {
-      if (command !== "install") return undefined;
+      if (command !== "install") return { binding: undefined, recovered };
       if (status.state === "unknown") fail("candidate_start_failed");
       if (status.state === "active" || (status.state === "stale" && status.managed)) {
         throw new BridgeRuntimeError("companion_not_managed");
       }
     } else if (status.state === "active") {
+      if (!status.managed) throw new BridgeRuntimeError("companion_not_managed");
+      const activeRelease: LifecycleRelease = {
+        version: status.companionVersion,
+        integrity: status.releaseIntegrity,
+        protocol_versions: [...status.protocolVersions],
+      };
       if (
-        !status.managed ||
-        status.companionVersion !== state.active.version ||
-        status.releaseIntegrity !== state.active.integrity ||
+        !sameRelease(activeRelease, state.active) ||
         !(await this.#hooks.owns(state.active))
       ) {
         throw new BridgeRuntimeError("companion_not_managed");
       }
     } else if (status.state === "stale") {
-      // A dead pre-binding process no longer has a verifiable working directory.
-      // Restart the prior exact release so active ownership can be proven first.
-      throw new BridgeRuntimeError("companion_not_managed");
+      if (
+        !status.managed ||
+        !(
+          command === "start" ||
+          command === "ensure" ||
+          command === "restart" ||
+          command === "update" ||
+          command === "rollback"
+        )
+      ) {
+        throw new BridgeRuntimeError("companion_not_managed");
+      }
+      const staleRelease: LifecycleRelease = {
+        version: status.companionVersion,
+        integrity: status.releaseIntegrity,
+        protocol_versions: [...status.protocolVersions],
+      };
+      if (!sameRelease(staleRelease, state.active)) {
+        throw new BridgeRuntimeError("companion_not_managed");
+      }
+      const pairing = await this.#validatedCandidate(state.active);
+      await this.#hooks.recoverStale(state.active);
+      if ((await this.#hooks.inspect()).state !== "stopped") fail("cutover_unknown");
+      await this.#assertPairingUnchanged(pairing);
+      try {
+        await this.#hooks.start(state.active);
+      } catch (caught) {
+        await this.#assertPairingUnchanged(pairing);
+        throw caught;
+      }
+      await this.#assertPairingUnchanged(pairing);
+      const active = await this.#hooks.inspect();
+      if (
+        active.state !== "active" ||
+        !active.managed ||
+        !sameRelease(
+          {
+            version: active.companionVersion,
+            integrity: active.releaseIntegrity,
+            protocol_versions: [...active.protocolVersions],
+          },
+          state.active,
+        ) ||
+        !(await this.#hooks.owns(state.active))
+      ) {
+        fail("cutover_unknown");
+      }
+      recovered = true;
     } else if (status.state === "unknown") {
       fail("cutover_unknown");
     }
@@ -2033,7 +2100,7 @@ export class BridgeLifecycle {
       binding_id: bindingId,
       lifecycle_root: lifecycleRoot,
     } satisfies ConfigLifecycleBinding);
-    return rootBinding;
+    return { binding: rootBinding, recovered };
   }
 
   async #validatedCandidate(release: LifecycleRelease): Promise<Buffer> {
