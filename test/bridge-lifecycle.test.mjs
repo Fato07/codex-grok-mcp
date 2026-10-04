@@ -34,6 +34,8 @@ import {
   BridgeLifecycleError,
   managedChildEnvironment,
   migrateReleaseTreePermissions,
+  npmCommand,
+  npmLifecycleEnvironment,
   preflightLifecycleRelease,
   stageLifecycleRelease,
   startLifecycleRelease,
@@ -2026,6 +2028,121 @@ test("staging rejects writable package roots and packed source files", async (co
     stageLifecycleRelease(join(fileWritable, "lifecycle"), writableFilePackageRoot),
     { message: "candidate_invalid" },
   );
+});
+
+test("npmCommand uses sibling npm-cli.js when npm_execpath is npx-cli.js", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-npm-npx-sibling-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const npxCli = join(root, "npx-cli.js");
+  const npmCli = join(root, "npm-cli.js");
+  await writeFile(npxCli, "process.exit(127);\n", { mode: 0o644 });
+  await writeFile(npmCli, "process.exit(0);\n", { mode: 0o644 });
+  assert.deepEqual(npmCommand(["pack", "--json"], { npm_execpath: npxCli }), {
+    command: process.execPath,
+    args: [npmCli, "pack", "--json"],
+  });
+});
+
+test("npmCommand falls back to PATH npm when npx-cli.js has no sibling", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-npm-npx-alone-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const npxCli = join(root, "npx-cli.js");
+  await writeFile(npxCli, "process.exit(127);\n", { mode: 0o644 });
+  assert.deepEqual(npmCommand(["pack"], { npm_execpath: npxCli }), {
+    command: "npm",
+    args: ["pack"],
+  });
+});
+
+test("npmCommand uses npm-cli.js npm_execpath as-is", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-npm-cli-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const npmCli = join(root, "npm-cli.js");
+  await writeFile(npmCli, "process.exit(0);\n", { mode: 0o644 });
+  assert.deepEqual(npmCommand(["install", "--ignore-scripts"], { npm_execpath: npmCli }), {
+    command: process.execPath,
+    args: [npmCli, "install", "--ignore-scripts"],
+  });
+});
+
+test("npmCommand falls back for yarn, pnpm, or a relative npm_execpath", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-npm-unknown-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const yarn = join(root, "yarn.js");
+  const pnpm = join(root, "pnpm.cjs");
+  await writeFile(yarn, "process.exit(1);\n", { mode: 0o644 });
+  await writeFile(pnpm, "process.exit(1);\n", { mode: 0o644 });
+  for (const npmExecPath of [yarn, pnpm, "npm-cli.js", "npx-cli.js"]) {
+    assert.deepEqual(npmCommand(["pack"], { npm_execpath: npmExecPath }), {
+      command: "npm",
+      args: ["pack"],
+    });
+  }
+});
+
+test("npmCommand falls back to PATH npm when npm_execpath is unset", () => {
+  assert.deepEqual(npmCommand(["pack", "--dry-run"], {}), {
+    command: "npm",
+    args: ["pack", "--dry-run"],
+  });
+});
+
+test("npmLifecycleEnvironment forces ignore-scripts for child npm", () => {
+  assert.equal(npmLifecycleEnvironment({ PATH: "/bin" }).npm_config_ignore_scripts, "true");
+});
+
+test("candidate pack check invoked through npx-cli sibling is pack", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-npm-npx-pack-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const npxCli = join(root, "npx-cli.js");
+  const npmCli = join(root, "npm-cli.js");
+  const npxLog = join(root, "npx-argv.json");
+  const npmLog = join(root, "npm-argv.json");
+  await writeFile(
+    npxCli,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(npxLog)}, JSON.stringify(process.argv.slice(2)));
+process.exit(127);
+`,
+    { mode: 0o644 },
+  );
+  await writeFile(
+    npmCli,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(npmLog)}, JSON.stringify(process.argv.slice(2)));
+process.exit(0);
+`,
+    { mode: 0o644 },
+  );
+  const packageRoot = join(root, "package");
+  const invoked = npmCommand(
+    ["pack", "--json", "--dry-run", "--ignore-scripts", packageRoot],
+    { npm_execpath: npxCli },
+  );
+  assert.equal(invoked.command, process.execPath);
+  assert.deepEqual(invoked.args, [
+    npmCli,
+    "pack",
+    "--json",
+    "--dry-run",
+    "--ignore-scripts",
+    packageRoot,
+  ]);
+  const child = spawn(invoked.command, invoked.args, {
+    cwd: root,
+    env: { PATH: process.env.PATH, TMPDIR: hermetic.base, npm_execpath: npxCli },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const [code] = await once(child, "exit");
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(await readFile(npmLog, "utf8")), [
+    "pack",
+    "--json",
+    "--dry-run",
+    "--ignore-scripts",
+    packageRoot,
+  ]);
+  await assert.rejects(lstat(npxLog), { code: "ENOENT" });
 });
 
 async function createFixtureRelease(root, version, byte) {

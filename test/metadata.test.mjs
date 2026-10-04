@@ -70,6 +70,8 @@ test("release version copies match package.json", async () => {
     pkg.files?.includes("npm-shrinkwrap.json"),
     true,
   );
+  check("package.json", "scripts.prepare", pkg.scripts?.prepare, undefined);
+  check("package.json", "scripts.prepack", pkg.scripts?.prepack, "npm run build");
   check("src/version.ts", "CODEX_GROK_VERSION", CODEX_GROK_VERSION, version);
   check(
     "plugins/codex-grok-mcp/.codex-plugin/plugin.json",

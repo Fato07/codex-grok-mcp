@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { constants as fsConstants, realpathSync } from "node:fs";
+import { constants as fsConstants, lstatSync, realpathSync } from "node:fs";
 import {
   chmod,
   link,
@@ -1139,12 +1139,45 @@ async function runProcess(
   });
 }
 
-function npmCommand(args: string[]): { command: string; args: string[] } {
-  const npmExecPath = process.env.npm_execpath;
+const NPM_CLI_NAME = /^npm-cli\.(?:js|cjs|mjs)$/;
+const NPX_CLI_NAME = /^npx-cli\.(?:js|cjs|mjs)$/;
+
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function resolvedNpmCli(npmExecPath: string): string | undefined {
+  const name = basename(npmExecPath);
+  if (NPM_CLI_NAME.test(name)) return npmExecPath;
+  if (NPX_CLI_NAME.test(name)) {
+    const sibling = join(dirname(npmExecPath), name.replace(/^npx-cli/, "npm-cli"));
+    if (isRegularFile(sibling)) return sibling;
+  }
+  return undefined;
+}
+
+export function npmCommand(
+  args: string[],
+  environment: NodeJS.ProcessEnv = process.env,
+): { command: string; args: string[] } {
+  const npmExecPath = environment.npm_execpath;
   if (npmExecPath !== undefined && isAbsolute(npmExecPath)) {
-    return { command: process.execPath, args: [npmExecPath, ...args] };
+    const npmCli = resolvedNpmCli(npmExecPath);
+    if (npmCli !== undefined) {
+      return { command: process.execPath, args: [npmCli, ...args] };
+    }
   }
   return { command: "npm", args };
+}
+
+export function npmLifecycleEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return { ...environment, npm_config_ignore_scripts: "true" };
 }
 
 type PackedLifecyclePackage = {
@@ -1493,6 +1526,7 @@ export async function stageLifecycleRelease(
     (
       await runProcess(previewCommand.command, previewCommand.args, {
         cwd: packageSnapshot.path,
+        env: npmLifecycleEnvironment(),
       }).catch(() => fail("install_failed"))
     ).stdout,
   );
@@ -1523,7 +1557,12 @@ export async function stageLifecycleRelease(
       packageSnapshot.path,
     ]);
     const packed = parsePackedLifecyclePackage(
-      (await runProcess(pack.command, pack.args, { cwd: staging })).stdout,
+      (
+        await runProcess(pack.command, pack.args, {
+          cwd: staging,
+          env: npmLifecycleEnvironment(),
+        })
+      ).stdout,
     );
     if (!samePackedPackage(preview, packed)) fail("candidate_invalid");
     await assertPackageRootUnchanged(packageSnapshot);
@@ -1559,7 +1598,10 @@ export async function stageLifecycleRelease(
       "--save-exact",
       packedPath,
     ]);
-    await runProcess(install.command, install.args, { cwd: staging });
+    await runProcess(install.command, install.args, {
+      cwd: staging,
+      env: npmLifecycleEnvironment(),
+    });
     const installedPackage = await readRegularJson(
       join(staging, "node_modules", PACKAGE_NAME, "package.json"),
       MAX_PACKAGE_JSON_BYTES,
