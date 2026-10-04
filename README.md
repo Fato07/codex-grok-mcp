@@ -180,7 +180,7 @@ npx --yes --package "codex-grok-mcp@${VERSION}" -- codex-grok-bridge install
 
 `install` is the bootstrap command. If an interrupted foreground companion left a lease behind, `install` reclaims only a private foreground lease whose recorded process is repeatedly proven gone. Active or unknown foreground leases, malformed leases, and managed mismatches still fail closed. An exact active managed candidate may be adopted.
 
-When migrating pre-binding beta state, `start`, `ensure`, `restart`, `update`, and `rollback` can recover an exact stale retained release. The lifecycle preflights that release, clears only its proven stale lease, restarts it from the requested root, verifies pairing and active ownership, and only then writes the binding pair. `stop`, `uninstall`, and mismatched releases still fail closed.
+When migrating pre-binding beta state, `start`, `ensure`, `restart`, same-release `update`, and `rollback` with no previous release recover an exact stale retained release: they preflight that release, clear only its proven stale lease, restart it from the requested root, verify pairing and active ownership, and only then write the binding pair. An `update` or `rollback` to a different release preflights only the target, then uses the same dead-or-not-ours lease proof before starting the target and publishing bindings. If the target start fails, the retained release may be started without another preflight (`update_failed_restored` or `restore_failed`) and bindings stay unpublished. `stop`, `uninstall`, and mismatched releases still fail closed.
 
 Lifecycle staging repacks the currently invoked package with lifecycle scripts disabled and verifies its SHA-512 identity. The published `npm-shrinkwrap.json` pins the production dependency closure, and staging rejects any installed dependency version or integrity that differs from it. The connector package itself is never resolved a second time.
 
@@ -294,7 +294,7 @@ npm audit --omit=dev
 npm audit --prefix relay
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a change.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [TESTING.md](TESTING.md), and [SECURITY.md](SECURITY.md) before opening a change. A real install with no registry access waits about 120 seconds, then fails with `install_failed`.
 
 ## License and attribution
 

@@ -92,6 +92,12 @@ type RootLifecycleBinding = {
 type EnsuredLifecycleBinding = {
   binding: RootLifecycleBinding | undefined;
   recovered: boolean;
+  deferred?: boolean;
+};
+
+export type ReleaseTreeInspection = {
+  lstat?: typeof lstat;
+  uid?: () => number;
 };
 
 export type LifecycleResult = {
@@ -145,6 +151,14 @@ export type LifecycleOptions = {
   hooks?: LifecycleHooks;
 };
 
+export type BridgeLifecycleErrorReason =
+  | "RELEASE_TREE_FOREIGN_OWNED"
+  | "RELEASE_TREE_GROUP_WRITABLE"
+  | "RELEASE_TREE_SPECIAL_BITS"
+  | "RELEASE_TREE_SYMLINK"
+  | "RELEASE_TREE_UNEXPECTED_MODE"
+  | "RELEASE_TREE_WORLD_WRITABLE";
+
 export class BridgeLifecycleError extends Error {
   readonly code:
     | "already_installed"
@@ -161,16 +175,21 @@ export class BridgeLifecycleError extends Error {
     | "uninstall_incomplete"
     | "update_failed_restored"
     | "version_conflict";
+  readonly reason: BridgeLifecycleErrorReason | undefined;
 
-  constructor(code: BridgeLifecycleError["code"]) {
+  constructor(code: BridgeLifecycleError["code"], reason?: BridgeLifecycleErrorReason) {
     super(code);
     this.name = "BridgeLifecycleError";
     this.code = code;
+    this.reason = reason;
   }
 }
 
-function fail(code: BridgeLifecycleError["code"]): never {
-  throw new BridgeLifecycleError(code);
+function fail(
+  code: BridgeLifecycleError["code"],
+  reason?: BridgeLifecycleErrorReason,
+): never {
+  throw new BridgeLifecycleError(code, reason);
 }
 
 function isNodeError(caught: unknown): caught is NodeJS.ErrnoException {
@@ -931,53 +950,61 @@ async function readRegularJson(path: string, maxBytes: number): Promise<unknown>
   }
 }
 
-export async function migrateReleaseTreePermissions(root: string, release: LifecycleRelease): Promise<void> {
+function rejectReleaseTreeMode(mode: number): never {
+  if ((mode & 0o002) !== 0) fail("candidate_invalid", "RELEASE_TREE_WORLD_WRITABLE");
+  if ((mode & 0o020) !== 0) fail("candidate_invalid", "RELEASE_TREE_GROUP_WRITABLE");
+  fail("candidate_invalid", "RELEASE_TREE_UNEXPECTED_MODE");
+}
+
+export async function migrateReleaseTreePermissions(
+  root: string,
+  release: LifecycleRelease,
+  inspection: ReleaseTreeInspection = {},
+): Promise<void> {
   const releasesRoot = join(root, "releases");
   const versionDir = join(releasesRoot, release.version);
   const releaseDir = releaseDirectory(root, release);
-  
+  const statDir = inspection.lstat ?? lstat;
+  const uidOf = inspection.uid ?? currentUid;
+
   for (const dir of [releasesRoot, versionDir, releaseDir]) {
     let details;
     try {
-      details = await lstat(dir);
+      details = await statDir(dir);
     } catch (caught) {
       if (isNodeError(caught) && caught.code === "ENOENT") continue;
       fail("candidate_invalid");
     }
-    
-    if (
-      details.isSymbolicLink() ||
-      !details.isDirectory() ||
-      details.uid !== currentUid() ||
-      (details.mode & 0o7000) !== 0 ||
-      (details.mode & 0o700) !== 0o700
-    ) {
-      fail("candidate_invalid");
-    }
-    
-    if ((details.mode & 0o7777) !== 0o700) {
-      const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
-      const directoryOnly =
-        typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
-      const handle = await open(dir, fsConstants.O_RDONLY | noFollow | directoryOnly);
-      try {
-        const opened = await handle.stat();
-        if (
-          opened.dev !== details.dev ||
-          opened.ino !== details.ino ||
-          !opened.isDirectory() ||
-          opened.uid !== currentUid()
-        ) {
-          fail("candidate_invalid");
-        }
-        await handle.chmod(0o700);
-      } finally {
-        await handle.close();
-      }
-      const after = await lstat(dir);
-      if ((after.mode & 0o7777) !== 0o700) {
+
+    if (details.isSymbolicLink()) fail("candidate_invalid", "RELEASE_TREE_SYMLINK");
+    if (!details.isDirectory()) fail("candidate_invalid", "RELEASE_TREE_UNEXPECTED_MODE");
+    if (details.uid !== uidOf()) fail("candidate_invalid", "RELEASE_TREE_FOREIGN_OWNED");
+    const mode = details.mode & 0o7777;
+    if ((mode & 0o7000) !== 0) fail("candidate_invalid", "RELEASE_TREE_SPECIAL_BITS");
+    if (mode === 0o700) continue;
+    if (mode !== 0o755) rejectReleaseTreeMode(mode);
+
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    const directoryOnly =
+      typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
+    const handle = await open(dir, fsConstants.O_RDONLY | noFollow | directoryOnly);
+    try {
+      const opened = await handle.stat();
+      if (
+        opened.dev !== details.dev ||
+        opened.ino !== details.ino ||
+        !opened.isDirectory() ||
+        opened.uid !== uidOf()
+      ) {
         fail("candidate_invalid");
       }
+      await handle.chmod(0o700);
+    } finally {
+      await handle.close();
+    }
+    const after = await statDir(dir);
+    if ((after.mode & 0o7777) !== 0o700) {
+      fail("candidate_invalid");
     }
   }
   await assertTrustedDirectoryChain(releaseDir, "candidate_invalid");
@@ -1653,7 +1680,7 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
-function managedChildEnvironment(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function managedChildEnvironment(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const name of [
     "HOME",
@@ -1859,6 +1886,8 @@ export class BridgeLifecycle {
   readonly #currentGrokDataRoot: string;
   readonly #baseProtectedPaths: string[];
   readonly #hooks: LifecycleHooks;
+  #plannedUpdateTarget: LifecycleRelease | undefined;
+  #deferredBinding = false;
 
   constructor(options: LifecycleOptions = {}) {
     if (options.hooks !== undefined && options.configPath === undefined) {
@@ -1902,12 +1931,19 @@ export class BridgeLifecycle {
     try {
       locks.push(await acquireLifecycleControl(configControlPath(this.#configPath)));
       locks.push(await acquireLifecycleControl(join(this.#root, "lifecycle-control")));
+      this.#plannedUpdateTarget = undefined;
+      this.#deferredBinding = false;
       const ensured = await this.#ensureBinding(command);
       const { binding } = ensured;
       if (binding !== undefined) {
         await assertRemovalPreserves(
           join(this.#root, "releases"),
           this.#protectedPaths(binding),
+        );
+      } else if (ensured.deferred) {
+        await assertRemovalPreserves(
+          join(this.#root, "releases"),
+          this.#protectedPaths(await this.#draftRootBinding()),
         );
       }
       const recoveryCompletesCommand =
@@ -1943,6 +1979,59 @@ export class BridgeLifecycle {
       ...binding.replay_roots,
       ...binding.grok_data_roots,
     ];
+  }
+
+  #defersRetainedRecovery(state: LifecycleState, command: LifecycleCommand): boolean {
+    return (
+      (command === "update" || command === "rollback") &&
+      this.#plannedUpdateTarget !== undefined &&
+      !sameRelease(this.#plannedUpdateTarget, state.active)
+    );
+  }
+
+  async #draftRootBinding(): Promise<RootLifecycleBinding> {
+    const [lifecycleRoot, configPath, replayRoot, grokDataRoot] = await Promise.all([
+      realpath(this.#root),
+      canonicalPathForComparison(this.#configPath, "lifecycle_state_invalid"),
+      canonicalPathForComparison(this.#currentReplayRoot, "lifecycle_state_invalid"),
+      canonicalPathForComparison(this.#currentGrokDataRoot, "lifecycle_state_invalid"),
+    ]);
+    return {
+      schema_version: 1,
+      binding_id: randomBytes(32).toString("base64url"),
+      config_path: configPath,
+      lifecycle_root: lifecycleRoot,
+      replay_roots: [replayRoot],
+      grok_data_roots: [grokDataRoot],
+    };
+  }
+
+  async #publishBindingPair(binding: RootLifecycleBinding): Promise<void> {
+    await createPrivateJson(rootBindingPath(this.#root), binding);
+    await createPrivateJson(bindingPath(this.#configPath), {
+      schema_version: 1,
+      binding_id: binding.binding_id,
+      lifecycle_root: binding.lifecycle_root,
+    } satisfies ConfigLifecycleBinding);
+  }
+
+  async #assertCandidateOwned(candidate: LifecycleRelease): Promise<void> {
+    const active = await this.#hooks.inspect();
+    if (
+      active.state !== "active" ||
+      !active.managed ||
+      !sameRelease(
+        {
+          version: active.companionVersion,
+          integrity: active.releaseIntegrity,
+          protocol_versions: [...active.protocolVersions],
+        },
+        candidate,
+      ) ||
+      !(await this.#hooks.owns(candidate))
+    ) {
+      fail("cutover_unknown");
+    }
   }
 
   async #validatedBindingForStatus(): Promise<RootLifecycleBinding | undefined> {
@@ -2096,6 +2185,15 @@ export class BridgeLifecycle {
       if (!sameRelease(staleRelease, state.active)) {
         throw new BridgeRuntimeError("companion_not_managed");
       }
+      if (command === "update") {
+        this.#plannedUpdateTarget = await this.#hooks.currentRelease();
+      } else if (command === "rollback" && state.previous !== null) {
+        this.#plannedUpdateTarget = state.previous;
+      }
+      if (this.#defersRetainedRecovery(state, command)) {
+        this.#deferredBinding = true;
+        return { binding: undefined, recovered, deferred: true };
+      }
       const pairing = await this.#validatedCandidate(state.active);
       await this.#hooks.recoverStale(state.active);
       if ((await this.#hooks.inspect()).state !== "stopped") fail("cutover_unknown");
@@ -2128,31 +2226,12 @@ export class BridgeLifecycle {
       fail("cutover_unknown");
     }
 
-    const [lifecycleRoot, configPath, replayRoot, grokDataRoot] = await Promise.all([
-      realpath(this.#root),
-      canonicalPathForComparison(this.#configPath, "lifecycle_state_invalid"),
-      canonicalPathForComparison(this.#currentReplayRoot, "lifecycle_state_invalid"),
-      canonicalPathForComparison(this.#currentGrokDataRoot, "lifecycle_state_invalid"),
-    ]);
-    const bindingId = randomBytes(32).toString("base64url");
-    rootBinding = {
-      schema_version: 1,
-      binding_id: bindingId,
-      config_path: configPath,
-      lifecycle_root: lifecycleRoot,
-      replay_roots: [replayRoot],
-      grok_data_roots: [grokDataRoot],
-    };
+    rootBinding = await this.#draftRootBinding();
     await assertRemovalPreserves(
       join(this.#root, "releases"),
       this.#protectedPaths(rootBinding),
     );
-    await createPrivateJson(rootBindingPath(this.#root), rootBinding);
-    await createPrivateJson(bindingPath(this.#configPath), {
-      schema_version: 1,
-      binding_id: bindingId,
-      lifecycle_root: lifecycleRoot,
-    } satisfies ConfigLifecycleBinding);
+    await this.#publishBindingPair(rootBinding);
     return { binding: rootBinding, recovered };
   }
 
@@ -2340,6 +2419,8 @@ export class BridgeLifecycle {
     candidate: LifecycleRelease,
     next: LifecycleState,
   ): Promise<boolean> {
+    const publishBindings = this.#deferredBinding;
+    this.#deferredBinding = false;
     const pairing = await this.#validatedCandidate(candidate);
     const status = await this.#recoverStale(await this.#hooks.inspect(), state.active);
     if (status.state === "active") {
@@ -2367,10 +2448,23 @@ export class BridgeLifecycle {
       fail("update_failed_restored");
     }
     await this.#assertPairingUnchanged(pairing);
+    await this.#assertCandidateOwned(candidate);
     try {
       await saveState(this.#root, next);
     } catch {
       fail("cutover_unknown");
+    }
+    if (publishBindings) {
+      try {
+        const binding = await this.#draftRootBinding();
+        await assertRemovalPreserves(
+          join(this.#root, "releases"),
+          this.#protectedPaths(binding),
+        );
+        await this.#publishBindingPair(binding);
+      } catch {
+        fail("cutover_unknown");
+      }
     }
     return true;
   }
@@ -2378,7 +2472,8 @@ export class BridgeLifecycle {
   async #update(): Promise<boolean> {
     const state = await loadState(this.#root);
     if (state === undefined) fail("not_installed");
-    const candidate = await this.#hooks.currentRelease();
+    const candidate = this.#plannedUpdateTarget ?? (await this.#hooks.currentRelease());
+    this.#plannedUpdateTarget = undefined;
     if (candidate.version === state.active.version && !sameRelease(candidate, state.active)) {
       fail("version_conflict");
     }

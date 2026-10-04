@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 
-const DEFAULT_SAND_ROOT = "/home/box/sand-data";
+export const DEFAULT_GROK_BOT_DATA_ROOT = "/home/box/sand-data";
+const LEGACY_GROK_BOT_DATA_ROOT = "/home/box/agent-data";
+const DEFAULT_SAND_ROOT = DEFAULT_GROK_BOT_DATA_ROOT;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_ENTRIES = 50;
@@ -124,19 +126,22 @@ type ClientOptions = {
   verifyServer?: (pid: number, port: number, host: string, startedAt: number) => boolean;
 };
 
+export type LocalGatewayErrorReason = "DATA_ROOT_SYMLINK" | "GATEWAY_ENV_MISMATCH";
+
 export class LocalGatewayError extends Error {
   readonly code: LocalGatewayErrorCode;
   readonly status: number;
   readonly requestId: string;
-  readonly reason: "DATA_ROOT_SYMLINK" | undefined;
+  readonly reason: LocalGatewayErrorReason | undefined;
 
   constructor(
     code: LocalGatewayErrorCode,
     status: number,
     requestId: string,
-    reason?: "DATA_ROOT_SYMLINK",
+    reason?: LocalGatewayErrorReason,
+    message = "Grok Bot gateway request failed.",
   ) {
-    super("Grok Bot gateway request failed.");
+    super(message);
     this.name = "LocalGatewayError";
     this.code = code;
     this.status = status;
@@ -167,20 +172,86 @@ function readPort(value: string | undefined): number | undefined {
   return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
 }
 
-export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
-    return env.SAND_DATA_ROOT;
+function existingRealpath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
   }
-  if (env.SAND_USER_DATA_DIR !== undefined && env.SAND_USER_DATA_DIR.trim() !== "") {
-    const root = isAbsolute(env.SAND_USER_DATA_DIR)
+}
+
+function realGrokBotDataRoots(): string[] {
+  const roots = new Set<string>();
+  for (const candidate of [DEFAULT_GROK_BOT_DATA_ROOT, LEGACY_GROK_BOT_DATA_ROOT]) {
+    roots.add(resolve(candidate));
+    const real = existingRealpath(candidate);
+    if (real !== undefined) roots.add(real);
+  }
+  return [...roots];
+}
+
+export function assertNotRealGrokBotDataRoot(root: string): void {
+  if (process.env.CODEX_GROK_TEST_HERMETIC !== "1") return;
+  const resolved = existingRealpath(root) ?? resolve(root);
+  for (const forbidden of realGrokBotDataRoots()) {
+    if (
+      resolved === forbidden ||
+      resolved === `${forbidden}${sep}` ||
+      resolved.startsWith(`${forbidden}${sep}`)
+    ) {
+      throw new Error("test data root resolved to the real Grok Bot data root");
+    }
+  }
+}
+
+export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {
+  let root: string;
+  if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
+    root = env.SAND_DATA_ROOT;
+  } else if (env.SAND_USER_DATA_DIR !== undefined && env.SAND_USER_DATA_DIR.trim() !== "") {
+    const userRoot = isAbsolute(env.SAND_USER_DATA_DIR)
       ? env.SAND_USER_DATA_DIR
       : resolve(env.SAND_USER_DATA_DIR);
-    return join(root, "sand-data");
+    root = join(userRoot, "sand-data");
+  } else {
+    root = DEFAULT_SAND_ROOT;
   }
-  return DEFAULT_SAND_ROOT;
+  assertNotRealGrokBotDataRoot(root);
+  return root;
+}
+
+function assertGatewayEnvMatchesDiscovery(
+  env: NodeJS.ProcessEnv,
+  file: z.infer<typeof discoveryFileSchema> | undefined,
+): void {
+  if (file === undefined) return;
+  const envPort = readPort(env.SAND_HOST_PORT);
+  if (envPort !== undefined && envPort !== file.port) {
+    throw new LocalGatewayError(
+      "CONFIG_INVALID",
+      0,
+      "",
+      "GATEWAY_ENV_MISMATCH",
+      "SAND_HOST_PORT does not match gateway.json",
+    );
+  }
+  const envHost = env.SAND_GATEWAY_BIND_HOST?.trim();
+  if (envHost !== undefined && envHost !== "") {
+    const fileHost = file.host?.trim() ?? "127.0.0.1";
+    if (normalizeGatewayHost(envHost) !== normalizeGatewayHost(fileHost)) {
+      throw new LocalGatewayError(
+        "CONFIG_INVALID",
+        0,
+        "",
+        "GATEWAY_ENV_MISMATCH",
+        "SAND_GATEWAY_BIND_HOST does not match gateway.json",
+      );
+    }
+  }
 }
 
 function readDiscovery(path: string): z.infer<typeof discoveryFileSchema> | undefined {
+  assertNotRealGrokBotDataRoot(dirname(path));
   try {
     const parent = lstatSync(dirname(path));
     if (parent.isSymbolicLink()) {
@@ -347,6 +418,7 @@ function parseLoopbackUrl(value: string): URL {
 function resolveGateway(options: ClientOptions): ResolvedGateway {
   const env = options.env ?? process.env;
   const file = readDiscovery(options.discoveryPath ?? join(grokBotDataRoot(env), "gateway.json"));
+  assertGatewayEnvMatchesDiscovery(env, file);
   const override = env.GROKBOT_GATEWAY_URL?.trim() || env.SAND_GATEWAY_URL?.trim();
   const url = override === undefined || override === "" ? undefined : parseLoopbackUrl(override);
   const hostValue =
@@ -590,6 +662,7 @@ export class LocalGrokBotClient {
         0,
         requestId,
         caught instanceof LocalGatewayError ? caught.reason : undefined,
+        caught instanceof LocalGatewayError ? caught.message : undefined,
       );
     }
   }
