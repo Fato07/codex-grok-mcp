@@ -512,6 +512,26 @@ export function expectedCommittedPath(
   return join(sandRoot, "agents", botId, "attachments", `${sha256}${extension}`);
 }
 
+function botAttachmentRoots(botId: string, sandRoot: string): string[] {
+  const lexical = [
+    resolve(sandRoot, "agents", botId, "attachments"),
+    resolve(sandRoot, "agents", botId, "assets"),
+  ];
+  let canonicalRoot: string | undefined;
+  try {
+    canonicalRoot = realpathSync(sandRoot);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    canonicalRoot = undefined;
+  }
+  if (canonicalRoot === undefined || canonicalRoot === resolve(sandRoot)) return lexical;
+  return [
+    ...lexical,
+    join(canonicalRoot, "agents", botId, "attachments"),
+    join(canonicalRoot, "agents", botId, "assets"),
+  ];
+}
+
 export function isUnderBotAttachmentRoots(
   path: string,
   botId: string,
@@ -522,11 +542,9 @@ export function isUnderBotAttachmentRoots(
     return false;
   }
   const lexical = resolve(path);
-  const roots = [
-    resolve(sandRoot, "agents", botId, "attachments"),
-    resolve(sandRoot, "agents", botId, "assets"),
-  ];
-  return roots.some((root) => lexical === root || lexical.startsWith(`${root}${sep}`));
+  return botAttachmentRoots(botId, sandRoot).some(
+    (root) => lexical === root || lexical.startsWith(`${root}${sep}`),
+  );
 }
 
 export function assertSafeBotAttachmentPath(path: string, botId: string, sandRoot: string): string {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { realpathSync } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1103,7 +1104,7 @@ test("outbound denies pairing bridge.json and shows the resolved path on a safe 
   );
   const safe = await writeText(hermetic.base, "ok.txt", "hello attachment\n");
   const decision = validateLocalAttachmentFile(safe, "ok.txt", { SAND_DATA_ROOT: hermetic.dataRoot }, home);
-  assert.equal(decision.resolved_path, safe);
+  assert.equal(decision.resolved_path, realpathSync(safe));
 });
 
 test("preview token binds bot, name, type, size, and sha", () => {
