@@ -2,11 +2,13 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
-## [0.2.0]
+## [0.2.0-beta.9] - 2026-10-04
+
+Prerelease. Stable `0.2.0` is not published; this beta carries every change since `0.2.0-beta.8`.
 
 ### Added
 
-- Stable local MCP access for isolated Grok calls and opt-in collaboration with named Bots already running inside Grok Bot.
+- Local MCP access for isolated Grok calls and opt-in collaboration with named Bots already running inside Grok Bot.
 - Exact-version managed companion install, status, start, stop, ensure, restart, update, retry-safe rollback, and pairing-preserving uninstall.
 - Exact-artifact lifecycle staging from the currently invoked package, avoiding a second package-version resolution during install or update.
 - Published npm shrinkwrap enforcement for the complete production dependency closure.
@@ -18,9 +20,17 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - Paired config/root ownership records, persisted protected data roots, maintenance-lease uninstall exclusion, and hard-link lease claims that prevent stale cleanup from displacing a new owner.
 - `update` and `rollback` to a different release preflight only the target and publish bindings only after start, unchanged pairing, and an explicit ownership check on every cutover; release-tree migration is limited to the exact legacy `0755` shape and rejects mixed trees without chmod; tests never resolve the real Grok Bot data root.
 
+### Fixed
+
+- Recover a stale managed companion that predates lifecycle ownership bindings: only an exact retained release is recovered, only its proven-stale lease is cleared, and bindings are written only after the restarted process and its working directory are verified.
+- Migrate a release tree restored with legacy `0755` directories to `0700` instead of failing every start with `candidate_invalid`; any other unsafe shape fails closed with a named `RELEASE_TREE_*` reason and no mode change.
+- Accept the genuine local gateway after the VM is paused and resumed: gateway verification no longer compares the descriptor start time against a process start time that drifts across pauses, and still requires the descriptor PID to own the listening socket (`GATEWAY_VERIFICATION_FAILED` otherwise).
+- Report `SAND_HOST_PORT` / `SAND_GATEWAY_BIND_HOST` disagreement with the gateway descriptor as an explicit `GATEWAY_ENV_MISMATCH` (`candidate_invalid` with that reason in managed preflight).
+
 ### Changed
 
 - A failed target stage or other failure before the switch during `update` or `rollback` from stale makes no state change except the existing lifecycle-root `0700` tightening. The stale lease, bindings, and release tree stay as they were; no child is started; the original staging or preflight error is returned unchanged. Earlier builds restarted the retained release when staging failed.
+- Update relay development tooling (wrangler, Cloudflare vitest plugin, sharp override) to clear dependency-audit advisories; runtime dependencies are unchanged.
 
 ### Verified boundaries
 
