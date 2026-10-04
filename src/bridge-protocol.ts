@@ -341,6 +341,7 @@ export const bridgeErrorCodeSchema = z.enum([
   "CANCELLED",
   "CONFIG_INVALID",
   "GATEWAY_REJECTED",
+  "GATEWAY_VERIFICATION_FAILED",
   "INVALID_RESPONSE",
   "OUTPUT_LIMIT",
   "RATE_LIMITED",

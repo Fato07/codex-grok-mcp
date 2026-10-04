@@ -245,7 +245,7 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
 
   assert.throws(
     () => new LocalGrokBotClient({ discoveryPath, env: {}, verifyServer: () => false }),
-    { code: "CONFIG_INVALID" },
+    { code: "GATEWAY_VERIFICATION_FAILED" },
   );
 
   if (process.platform === "linux") {
@@ -389,4 +389,103 @@ test("descriptor rotation while reading a response body fails closed without ret
   await assert.rejects(client.listAgents(), { code: "CONFIG_INVALID" });
   assert.equal(requests, 1);
   assert.equal(pulls, 2);
+});
+
+test("gateway verification accepts genuine gateway with clock skew (VM pause)", async (context) => {
+  if (process.platform !== "linux") return context.skip("Linux only");
+  
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-gateway-skew-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  
+  const gateway = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/health") response.end(JSON.stringify({ ok: true, isBusy: false }));
+    else if (request.url === "/api/listAgents") response.end("[]");
+    else {
+      response.statusCode = 404;
+      response.end("{}");
+    }
+  });
+  
+  gateway.listen(0, "127.0.0.1");
+  await new Promise((resolve, reject) => {
+    gateway.once("listening", resolve);
+    gateway.once("error", reject);
+  });
+  const address = gateway.address();
+  assert(address && typeof address === "object");
+  
+  const now = Date.now();
+  await writeSecureDiscovery(discoveryPath, {
+    port: address.port,
+    pid: process.pid,
+    startedAt: now - 338_000,
+    host: "127.0.0.1",
+    token: "test-token",
+  });
+  
+  const client = new LocalGrokBotClient({ discoveryPath });
+  const discovery = client.discovery();
+  assert.equal(discovery.port, address.port);
+  assert.equal(discovery.pid, process.pid);
+  
+  await new Promise((resolve) => gateway.close(resolve));
+});
+
+test("gateway verification fails for reused PID without listening socket", async (context) => {
+  if (process.platform !== "linux") return context.skip("Linux only");
+  
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-reused-pid-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  
+  await writeSecureDiscovery(discoveryPath, {
+    port: 65_000,
+    pid: process.pid,
+    startedAt: Date.now(),
+    host: "127.0.0.1",
+    token: "test-token",
+  });
+  
+  assert.throws(
+    () => new LocalGrokBotClient({ discoveryPath }).discovery(),
+    { code: "GATEWAY_VERIFICATION_FAILED" },
+  );
+});
+
+test("gateway verification rejects descriptor startedAt in the future", async (context) => {
+  if (process.platform !== "linux") return context.skip("Linux only");
+  
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-future-start-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  
+  const gateway = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true, isBusy: false }));
+  });
+  
+  gateway.listen(0, "127.0.0.1");
+  await new Promise((resolve, reject) => {
+    gateway.once("listening", resolve);
+    gateway.once("error", reject);
+  });
+  const address = gateway.address();
+  assert(address && typeof address === "object");
+  
+  await writeSecureDiscovery(discoveryPath, {
+    port: address.port,
+    pid: process.pid,
+    startedAt: Date.now() + 10_000,
+    host: "127.0.0.1",
+    token: "test-token",
+  });
+  
+  assert.throws(
+    () => new LocalGrokBotClient({ discoveryPath }).discovery(),
+    { code: "GATEWAY_VERIFICATION_FAILED" },
+  );
+  
+  await new Promise((resolve) => gateway.close(resolve));
 });
