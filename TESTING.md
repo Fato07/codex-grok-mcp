@@ -25,6 +25,9 @@ Linux-only tests skip on macOS. The Linux total must equal macOS pass + skip. Cu
 - gateway verification accepts genuine gateway with clock skew (VM pause)
 - gateway verification fails for reused PID without listening socket
 - gateway verification rejects descriptor startedAt in the future
+- readAttachment is only called with a path taken from a fresh transcript entry
+- symlink swap after a successful confined open does not leak on later windows
+- parent-directory swap after a confined open is ATTACHMENT_REJECTED
 
 ## Sandbox caveat
 

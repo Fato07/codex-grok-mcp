@@ -835,6 +835,7 @@ test("no retry after an ambiguous send", async () => {
 });
 
 test("readAttachment is only called with a path taken from a fresh transcript entry", async (context) => {
+  if (process.platform !== "linux") return context.skip("Linux only");
   const stagingRoot = await fixtureDir(context, "att-fresh-path");
   const env = { SAND_DATA_ROOT: hermetic.dataRoot };
   const digest = sha256(PNG);
@@ -1032,6 +1033,7 @@ test("hardlink in attachments is ATTACHMENT_REJECTED and does not leak", async (
 });
 
 test("symlink swap after a successful confined open does not leak on later windows", async (context) => {
+  if (process.platform !== "linux") return context.skip("Linux only");
   const stagingRoot = await fixtureDir(context, "att-b2-swap");
   const secret = join(hermetic.base, "swap-secret.txt");
   await writeFile(secret, "FIXTURE_SECRET".padEnd(70_000, "B"));
@@ -1455,7 +1457,8 @@ test("inbound parent-directory swap with no /proc does not leak", async (context
   }
 });
 
-test("parent-directory swap after a confined open is ATTACHMENT_REJECTED", async () => {
+test("parent-directory swap after a confined open is ATTACHMENT_REJECTED", async (context) => {
+  if (process.platform !== "linux") return context.skip("Linux only");
   const attachments = join(hermetic.dataRoot, "agents", BOT, "attachments");
   rmSync(attachments, { recursive: true, force: true });
   const path = await writeBotAttachment(BOT, "keep.txt", "SAFE_BYTES");
