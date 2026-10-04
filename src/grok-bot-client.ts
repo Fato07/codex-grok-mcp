@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 
@@ -218,41 +218,10 @@ function readPort(value: string | undefined): number | undefined {
   return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
 }
 
-function existingRealpath(path: string): string | undefined {
-  try {
-    return realpathSync(path);
-  } catch {
-    return undefined;
-  }
-}
-
 export function isLexicalGrokBotDataRootPath(path: string): boolean {
   const resolved = resolve(path);
   for (const candidate of GROK_BOT_DATA_ROOTS) {
     const forbidden = resolve(candidate);
-    if (
-      resolved === forbidden ||
-      resolved === `${forbidden}${sep}` ||
-      resolved.startsWith(`${forbidden}${sep}`)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function realGrokBotDataRoots(): string[] {
-  const roots = new Set<string>();
-  for (const candidate of GROK_BOT_DATA_ROOTS) {
-    roots.add(resolve(candidate));
-    const real = existingRealpath(candidate);
-    if (real !== undefined) roots.add(real);
-  }
-  return [...roots];
-}
-
-function isRealGrokBotDataRoot(resolved: string): boolean {
-  for (const forbidden of realGrokBotDataRoots()) {
     if (
       resolved === forbidden ||
       resolved === `${forbidden}${sep}` ||
@@ -270,8 +239,7 @@ function testRealDataRootGuardActive(): boolean {
 
 export function assertNotRealGrokBotDataRoot(root: string): void {
   if (!testRealDataRootGuardActive()) return;
-  const resolved = existingRealpath(root) ?? resolve(root);
-  if (isRealGrokBotDataRoot(resolved)) throw new TestRealDataRootError();
+  if (isLexicalGrokBotDataRootPath(root)) throw new TestRealDataRootError();
 }
 
 export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {

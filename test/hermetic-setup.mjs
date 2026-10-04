@@ -40,7 +40,11 @@ function createFixture() {
   mkdirSync(dataRoot, { mode: 0o700 });
   const accountHome = join(base, "home");
   mkdirSync(accountHome, { mode: 0o700 });
-  const state = { base, dataRoot, accountHome };
+  const defaultSandRoot = join(base, "default-sand");
+  const legacySandRoot = join(base, "legacy-sand");
+  mkdirSync(defaultSandRoot, { mode: 0o700 });
+  mkdirSync(legacySandRoot, { mode: 0o700 });
+  const state = { base, dataRoot, accountHome, defaultSandRoot, legacySandRoot };
   globalThis[STATE] = state;
   process.on("exit", () => removeHermeticFixtureBase(base));
   return state;

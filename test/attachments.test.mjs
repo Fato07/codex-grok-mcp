@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   InMemoryTransport,
@@ -146,7 +147,16 @@ async function writeBotAttachment(botId, name, contents) {
   return path;
 }
 
-const FIXTURE_GUARD = { homes: [hermetic.accountHome] };
+function attachmentGuard(home = hermetic.accountHome, extra = {}) {
+  const guard = {
+    homes: extra.homes ?? [home],
+    sandRoots: extra.sandRoots ?? [hermetic.defaultSandRoot, hermetic.legacySandRoot],
+  };
+  if (extra.resolveOpenedFd !== undefined) guard.resolveOpenedFd = extra.resolveOpenedFd;
+  return guard;
+}
+
+const FIXTURE_GUARD = attachmentGuard();
 
 function unavailableOpenedFd() {
   throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
@@ -402,6 +412,21 @@ test("empty file is rejected", async (context) => {
       assert.equal(caught.code, "ATTACHMENT_REJECTED");
       return true;
     },
+  );
+});
+
+test("missing outbound source is ATTACHMENT_REJECTED", () => {
+  const missing = join(hermetic.base, "missing-outbound.txt");
+  assert.throws(
+    () =>
+      validateLocalAttachmentFile(
+        missing,
+        "note.txt",
+        { SAND_DATA_ROOT: hermetic.dataRoot },
+        hermetic.accountHome,
+        FIXTURE_GUARD,
+      ),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
 });
 
@@ -1109,13 +1134,13 @@ test("outbound denies grok auth.json by path and by file identity", async (conte
   const auth = join(grokDir, "auth.json");
   await writeFile(auth, '{"token":"nope"}', { mode: 0o600 });
   assert.throws(
-    () => validateLocalAttachmentFile(auth, "auth.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home, { homes: [home] }),
+    () => validateLocalAttachmentFile(auth, "auth.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home, attachmentGuard(home)),
     (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
   const copy = join(hermetic.base, "not-secret.json");
   await link(auth, copy);
   assert.throws(
-    () => validateLocalAttachmentFile(copy, "not-secret.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home, { homes: [home] }),
+    () => validateLocalAttachmentFile(copy, "not-secret.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home, attachmentGuard(home)),
     (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
 });
@@ -1127,11 +1152,11 @@ test("outbound denies pairing bridge.json and shows the resolved path on a safe 
   const pairing = join(configDir, "bridge.json");
   await writeFile(pairing, '{"key":"nope"}', { mode: 0o600 });
   assert.throws(
-    () => validateLocalAttachmentFile(pairing, "bridge.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home, { homes: [home] }),
+    () => validateLocalAttachmentFile(pairing, "bridge.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home, attachmentGuard(home)),
     (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
   const safe = await writeText(hermetic.base, "ok.txt", "hello attachment\n");
-  const decision = validateLocalAttachmentFile(safe, "ok.txt", { SAND_DATA_ROOT: hermetic.dataRoot }, home, { homes: [home] });
+  const decision = validateLocalAttachmentFile(safe, "ok.txt", { SAND_DATA_ROOT: hermetic.dataRoot }, home, attachmentGuard(home));
   assert.equal(decision.resolved_path, realpathSync(safe));
 });
 
@@ -1553,7 +1578,7 @@ test("outbound still rejects injected account-home credentials when hermetic env
     [pairing, "bridge.json"],
   ]) {
     assert.throws(
-      () => validateLocalAttachmentFile(path, name, env, spoofHome, { homes: [accountHome] }),
+      () => validateLocalAttachmentFile(path, name, env, spoofHome, attachmentGuard(accountHome)),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
   }
@@ -1566,7 +1591,7 @@ test("outbound falls back to path realpath when /proc/self/fd is unavailable", a
     "fallback.txt",
     { SAND_DATA_ROOT: hermetic.dataRoot },
     hermetic.accountHome,
-    { homes: [hermetic.accountHome], resolveOpenedFd: unavailableOpenedFd },
+    attachmentGuard(hermetic.accountHome, { resolveOpenedFd: unavailableOpenedFd }),
   );
   assert.equal(decision.bytes.toString("utf8"), "hello fallback\n");
   assert.equal(decision.resolved_path, realpathSync(safe));
@@ -1611,9 +1636,7 @@ test("outbound denies default connector trees when XDG is redirected", async () 
   for (const path of paths) {
     assert.throws(
       () =>
-        validateLocalAttachmentFile(path, path.endsWith(".txt") ? "note.txt" : "note.json", env, home, {
-          homes: [home],
-        }),
+        validateLocalAttachmentFile(path, path.endsWith(".txt") ? "note.txt" : "note.json", env, home, attachmentGuard(home)),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
   }
@@ -1645,7 +1668,7 @@ test("outbound denies credential paths that differ only by case on a case-insens
   ];
   for (const [path, name] of variants) {
     assert.throws(
-      () => validateLocalAttachmentFile(path, name, env, home, { homes: [home] }),
+      () => validateLocalAttachmentFile(path, name, env, home, attachmentGuard(home)),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
   }
@@ -1654,27 +1677,32 @@ test("outbound denies credential paths that differ only by case on a case-insens
 test("outbound still denies default and legacy sand roots when SAND_DATA_ROOT is redirected", async () => {
   const home = join(hermetic.base, "g1-home");
   const redirected = join(hermetic.base, "g1-sand");
-  await mkdir(join(redirected, "config"), { recursive: true, mode: 0o700 });
-  await writeFile(join(redirected, "gateway.json"), '{"port":1}\n', { mode: 0o600 });
-  await writeFile(join(redirected, "config", "c.json"), '{"x":1}\n', { mode: 0o600 });
-  const env = { HOME: home, SAND_DATA_ROOT: redirected };
-  for (const path of [join(redirected, "gateway.json"), join(redirected, "config", "c.json")]) {
-    assert.throws(
-      () => validateLocalAttachmentFile(path, path.endsWith(".json") ? "note.json" : "note.txt", env, home, {
-        homes: [home],
-      }),
-      (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
-    );
+  const defaultRoot = join(hermetic.base, "g1-default-sand");
+  const legacyRoot = join(hermetic.base, "g1-legacy-sand");
+  for (const root of [redirected, defaultRoot, legacyRoot]) {
+    await mkdir(join(root, "config"), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, "gateway.json"), '{"port":1}\n', { mode: 0o600 });
+    await writeFile(join(root, "config", "c.json"), '{"x":1}\n', { mode: 0o600 });
   }
-  const fakeStats = { dev: 1, ino: 99, isFile: () => true, isDirectory: () => false };
+  const env = { HOME: home, SAND_DATA_ROOT: redirected };
+  const guard = attachmentGuard(home, { sandRoots: [defaultRoot, legacyRoot] });
   for (const path of [
-    join(DEFAULT_GROK_BOT_DATA_ROOT, "gateway.json"),
-    join(DEFAULT_GROK_BOT_DATA_ROOT, "config", "c.json"),
-    join(LEGACY_GROK_BOT_DATA_ROOT, "gateway.json"),
-    join(LEGACY_GROK_BOT_DATA_ROOT, "config", "c.json"),
+    join(redirected, "gateway.json"),
+    join(redirected, "config", "c.json"),
+    join(defaultRoot, "gateway.json"),
+    join(defaultRoot, "config", "c.json"),
+    join(legacyRoot, "gateway.json"),
+    join(legacyRoot, "config", "c.json"),
   ]) {
     assert.throws(
-      () => assertNotSensitiveAttachmentSource(path, fakeStats, env, home, [home]),
+      () =>
+        validateLocalAttachmentFile(
+          path,
+          path.endsWith(".json") ? "note.json" : "note.txt",
+          env,
+          home,
+          guard,
+        ),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
   }
@@ -1707,9 +1735,13 @@ test("outbound denies redirected CODEX_HOME and GROK_HOME wholesale", async () =
   for (const path of paths) {
     assert.throws(
       () =>
-        validateLocalAttachmentFile(path, path.endsWith(".toml") ? "note.txt" : "note.json", env, home, {
-          homes: [home],
-        }),
+        validateLocalAttachmentFile(
+          path,
+          path.endsWith(".toml") ? "note.txt" : "note.json",
+          env,
+          home,
+          attachmentGuard(home),
+        ),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
   }
@@ -1732,7 +1764,7 @@ test("outbound denies a directory whose inode matches a credential tree", async 
           stats,
           { HOME: home, SAND_DATA_ROOT: hermetic.dataRoot },
           home,
-          [home],
+          attachmentGuard(home),
           { fd, resolveOpenedFd: () => key },
         ),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
@@ -1765,7 +1797,7 @@ test("outbound ancestor-dev-ino check denies a bind-mounted credential directory
         "key.txt",
         { HOME: home, SAND_DATA_ROOT: hermetic.dataRoot },
         home,
-        { homes: [home] },
+        attachmentGuard(home),
       ),
     (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
@@ -1789,7 +1821,7 @@ test("outbound folds macOS paths with NFC before deny comparison", async () => {
           "auth.json",
           { HOME: homeNfd, SAND_DATA_ROOT: hermetic.dataRoot },
           homeNfd,
-          { homes: [homeNfd] },
+          attachmentGuard(homeNfd),
         ),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
@@ -1797,6 +1829,50 @@ test("outbound folds macOS paths with NFC before deny comparison", async () => {
     if (descriptor === undefined) delete process.platform;
     else Object.defineProperty(process, "platform", descriptor);
   }
+});
+
+test("hermetic attachment deny and data-root guard do not syscall real Sand roots", async () => {
+  const repo = fileURLToPath(new URL("..", import.meta.url));
+  const script = join(hermetic.base, "sh1-no-real-root.mjs");
+  await writeFile(
+    script,
+    `
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  DEFAULT_GROK_BOT_DATA_ROOT,
+  TestRealDataRootError,
+  grokBotDataRoot,
+} from ${JSON.stringify(join(repo, "dist/grok-bot-client.js"))};
+import { validateLocalAttachmentFile } from ${JSON.stringify(join(repo, "dist/attachments.js"))};
+grokBotDataRoot();
+try {
+  grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT });
+  throw new Error("expected TestRealDataRootError");
+} catch (caught) {
+  if (!(caught instanceof TestRealDataRootError)) throw caught;
+}
+const home = process.env.HOME;
+const sand = process.env.SAND_DATA_ROOT;
+const defaultRoot = join(process.env.TMPDIR, "sh1-default-sand");
+const legacyRoot = join(process.env.TMPDIR, "sh1-legacy-sand");
+mkdirSync(defaultRoot, { recursive: true, mode: 0o700 });
+mkdirSync(legacyRoot, { recursive: true, mode: 0o700 });
+const file = join(process.env.TMPDIR, "sh1-ok.txt");
+writeFileSync(file, "hello attachment\\n");
+validateLocalAttachmentFile(file, "ok.txt", { HOME: home, SAND_DATA_ROOT: sand }, home, {
+  homes: [home],
+  sandRoots: [defaultRoot, legacyRoot],
+});
+`,
+  );
+  const spy = fileURLToPath(new URL("./real-root-fs-spy.cjs", import.meta.url));
+  const traced = spawnSync(process.execPath, ["--require", spy, script], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  assert.equal(traced.status, 0, traced.stderr);
+  assert.equal(traced.stderr.includes("REAL_ROOT_SYSCALLS"), false, traced.stderr);
 });
 
 test("tool fetch rejects an oversize companion total_size on the first window", async () => {

@@ -20,6 +20,7 @@ import { GROK_BOT_DATA_ROOTS, TestRealDataRootError, grokBotDataRoot } from "./g
 
 export type AttachmentPathGuard = {
   homes?: readonly string[];
+  sandRoots?: readonly string[];
   resolveOpenedFd?: (fd: number) => string;
 };
 
@@ -459,9 +460,14 @@ function openNoFollow(path: string, flags: number, mode?: number): number {
 }
 
 function assertRegularFile(path: string): Stats {
-  const details = lstatSync(path);
-  if (details.isSymbolicLink() || details.isFile() === false) fail("ATTACHMENT_REJECTED");
-  return details;
+  try {
+    const details = lstatSync(path);
+    if (details.isSymbolicLink() || details.isFile() === false) fail("ATTACHMENT_REJECTED");
+    return details;
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError || caught instanceof AttachmentError) throw caught;
+    fail("ATTACHMENT_REJECTED");
+  }
 }
 
 function accountHomes(
@@ -507,7 +513,7 @@ function connectorTree(root: string): string {
 function deniedAttachmentLocations(
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
-  extraHomes?: readonly string[],
+  guard?: AttachmentPathGuard,
 ): { prefixes: string[]; files: string[] } {
   const prefixes: string[] = [];
   const files: string[] = [];
@@ -531,7 +537,7 @@ function deniedAttachmentLocations(
     addFile(join(root, "gateway.json"));
     addPrefix(join(root, "config"));
   };
-  for (const candidate of accountHomes(environment, home, extraHomes)) {
+  for (const candidate of accountHomes(environment, home, guard?.homes)) {
     addPrefix(join(candidate, ".grok"));
     addPrefix(join(candidate, ".codex"));
     addPrefix(join(candidate, ".ssh"));
@@ -563,7 +569,7 @@ function deniedAttachmentLocations(
   if (configuredAuth !== undefined && configuredAuth !== "") {
     addFile(isAbsolute(configuredAuth) ? configuredAuth : resolve(configuredAuth));
   }
-  for (const root of GROK_BOT_DATA_ROOTS) addSandRootSecrets(root);
+  for (const root of guard?.sandRoots ?? GROK_BOT_DATA_ROOTS) addSandRootSecrets(root);
   try {
     addSandRootSecrets(grokBotDataRoot(environment));
   } catch (caught) {
@@ -634,10 +640,10 @@ export function assertNotSensitiveAttachmentSource(
   stats: Stats,
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
-  extraHomes?: readonly string[],
+  guard?: AttachmentPathGuard,
   opened?: { fd: number; resolveOpenedFd?: (fd: number) => string },
 ): void {
-  const { prefixes, files } = deniedAttachmentLocations(environment, home, extraHomes);
+  const { prefixes, files } = deniedAttachmentLocations(environment, home, guard);
   const resolved = resolve(resolvedPath);
   for (const prefix of prefixes) {
     if (pathIsUnder(resolved, prefix)) fail("ATTACHMENT_REJECTED");
@@ -687,7 +693,7 @@ export function validateLocalAttachmentFile(
     const resolvedPath = outboundResolvedFdPath(fd, path, next, guard?.resolveOpenedFd);
     const opened =
       guard?.resolveOpenedFd === undefined ? { fd } : { fd, resolveOpenedFd: guard.resolveOpenedFd };
-    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home, guard?.homes, opened);
+    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home, guard, opened);
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
     while (offset < bytes.length) {

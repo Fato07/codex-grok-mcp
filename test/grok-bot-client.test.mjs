@@ -628,6 +628,14 @@ test("with the hermetic flag the real root throws TestRealDataRootError", () => 
       () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
       (caught) => caught instanceof TestRealDataRootError,
     );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: `${DEFAULT_GROK_BOT_DATA_ROOT}/./` }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: join(DEFAULT_GROK_BOT_DATA_ROOT, "..", "sand-data") }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
   });
   assert.equal(captured.stderr, "");
   assert.equal(captured.exitCode, process.exitCode);

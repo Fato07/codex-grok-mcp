@@ -242,6 +242,24 @@ test("npm pack excludes attachment test-hooks files", async () => {
       }
     }
     assert.deepEqual(hits, []);
+    const packedText = Object.fromEntries(
+      await Promise.all(distFiles.map(async (name) => [name, await readFile(join(distDir, name), "utf8")])),
+    );
+    const sandRootFiles = distFiles.filter((name) => packedText[name].includes("sandRoots"));
+    assert.deepEqual(
+      sandRootFiles.filter((name) => name.startsWith("attachments.") === false),
+      [],
+      `sandRoots leaked outside attachments: ${sandRootFiles.join(", ")}`,
+    );
+    for (const name of ["index.js", "bridge-companion.js"]) {
+      const text = packedText[name];
+      assert.equal(text.includes("sandRoots"), false, `${name} exposes sandRoots`);
+      assert.equal(text.includes("attachmentGuard"), false, `${name} exposes attachmentGuard`);
+      assert.equal(text.includes("homes:"), false, `${name} exposes homes override`);
+    }
+    const gateway = packedText["grok-bot-gateway.js"];
+    assert.equal(gateway.includes("sandRoots"), false, "grok-bot-gateway.js exposes sandRoots");
+    assert.equal(gateway.includes("homes:"), false, "grok-bot-gateway.js exposes homes override");
     assert.deepEqual(await distMtimes(sourceDist), before);
   } finally {
     await rm(dest, { recursive: true, force: true });
