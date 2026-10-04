@@ -1733,7 +1733,7 @@ test("outbound denies a directory whose inode matches a credential tree", async 
           { HOME: home, SAND_DATA_ROOT: hermetic.dataRoot },
           home,
           [home],
-          { fd },
+          { fd, resolveOpenedFd: () => key },
         ),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
