@@ -352,7 +352,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
 
   assert.deepEqual(result.result, {
     companion_version: CODEX_GROK_VERSION,
-    supported_protocol_versions: [1, 2, 3],
+    supported_protocol_versions: [1, 2, 3, 4],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,
     gateway_busy: true,

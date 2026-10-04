@@ -98,7 +98,34 @@ export type LocalSendPromptInput = {
   agentId: string;
   prompt: string;
   clientNonce: string;
+  attachmentPaths?: string[];
+  attachmentNames?: string[];
 };
+
+const hostStatusSchema = z
+  .object({
+    hostVersion: z.string().min(1).max(64),
+    latestHostVersion: z.string().max(64).optional(),
+    hostUpdateAvailable: z.boolean().optional(),
+    isBusy: z.boolean().optional(),
+    capabilities: z.array(z.string().max(128)).max(32).optional(),
+  })
+  .passthrough();
+
+const uploadAttachmentResultSchema = z.object({ path: z.string().min(1).max(4_096) }).passthrough();
+
+const attachmentChunkSchema = z
+  .object({
+    bytesBase64: z.string(),
+    totalSize: z.number().int().nonnegative(),
+    mime: z.string().max(128).nullable(),
+    resolvedName: z.string().max(512).optional(),
+  })
+  .passthrough();
+
+export type LocalHostStatus = z.infer<typeof hostStatusSchema>;
+export type LocalUploadAttachmentResult = z.infer<typeof uploadAttachmentResultSchema>;
+export type LocalAttachmentChunk = z.infer<typeof attachmentChunkSchema>;
 
 export type LocalGatewayErrorCode =
   | "AUTH_FAILED"
@@ -543,9 +570,61 @@ export class LocalGrokBotClient {
         agentId: input.agentId,
         prompt: input.prompt,
         clientNonce: input.clientNonce,
+        ...(input.attachmentPaths === undefined ? {} : { attachmentPaths: input.attachmentPaths }),
+        ...(input.attachmentNames === undefined ? {} : { attachmentNames: input.attachmentNames }),
       },
       true,
       sendResultSchema,
+    );
+  }
+
+  async getHostStatus(
+    input: { includeManagedCapabilities?: boolean } = {},
+  ): Promise<LocalHostStatus> {
+    return await this.#request(
+      "POST",
+      "/api/getHostStatus",
+      input.includeManagedCapabilities === true ? { includeManagedCapabilities: true } : {},
+      true,
+      hostStatusSchema,
+    );
+  }
+
+  async uploadAttachment(input: {
+    agentId: string;
+    filename: string;
+    bytesBase64: string;
+  }): Promise<LocalUploadAttachmentResult> {
+    return await this.#request(
+      "POST",
+      "/api/uploadAttachment",
+      {
+        agentId: input.agentId,
+        filename: input.filename,
+        bytesBase64: input.bytesBase64,
+      },
+      true,
+      uploadAttachmentResultSchema,
+    );
+  }
+
+  async readAttachmentChunk(input: {
+    agentId: string;
+    path: string;
+    offset: number;
+    length: number;
+  }): Promise<LocalAttachmentChunk | null> {
+    return await this.#request(
+      "POST",
+      "/api/readAttachmentChunk",
+      {
+        agentId: input.agentId,
+        path: input.path,
+        offset: input.offset,
+        length: input.length,
+      },
+      true,
+      z.union([z.null(), attachmentChunkSchema]),
     );
   }
 

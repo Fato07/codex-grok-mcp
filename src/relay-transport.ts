@@ -13,7 +13,10 @@ import {
   type GrokBotTransport,
 } from "./grok-bot-gateway.js";
 import { decryptFrame, encryptFrame, type PairingConfig } from "./bridge-pairing.js";
-import { BRIDGE_STATUS_PROTOCOL_VERSION } from "./version.js";
+import {
+  BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+  BRIDGE_STATUS_PROTOCOL_VERSION,
+} from "./version.js";
 
 export const RELAY_TIMEOUT_MS = 15_000;
 const MAX_RELAY_FRAME_BYTES = 128 * 1024;
@@ -22,6 +25,10 @@ const INVALID_FRAME_CLOSE_CODE = 4400;
 const FRAME_AUTH_FAILED_CLOSE_CODE = 4401;
 
 const remoteErrorMessages: Record<BridgeErrorCode, string> = {
+  ATTACHMENT_INTEGRITY: "The attachment failed an integrity check.",
+  ATTACHMENT_REJECTED: "The attachment was rejected.",
+  ATTACHMENT_STALE: "The attachment is no longer available. Refresh the Bot read and try again.",
+  ATTACHMENT_TOO_LARGE: "The attachment exceeds the v1 size limit.",
   AUTH_FAILED: "Grok Bot companion authentication failed.",
   BOT_NOT_FOUND: "Bot ID is not present in the current roster. List Bots again.",
   CANCELLED: "Grok Bot companion request was cancelled.",
@@ -183,7 +190,11 @@ async function requestRelay(
       const peerUnavailable = code === PEER_UNAVAILABLE_CLOSE_CODE;
       const authenticationFailed = code === FRAME_AUTH_FAILED_CLOSE_CODE;
       const upgradeRequired =
-        (request.op === "read_bot" || request.op === "status") &&
+        (request.op === "read_bot" ||
+          request.op === "status" ||
+          request.op === "attachment_stage" ||
+          request.op === "attachment_commit" ||
+          request.op === "attachment_fetch") &&
         code === INVALID_FRAME_CLOSE_CODE;
       finish({
         kind: "reject",
@@ -297,7 +308,7 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
         const response = await requestRelay(
           config,
           {
-            v: 2,
+            v: options.protocolVersion ?? 2,
             id: randomUUID(),
             issued_at_ms: Date.now(),
             op: "read_bot",
@@ -318,17 +329,26 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
         return response.result;
       }, signal);
     },
-    async sendMessage(botId: string, message: string, signal?: AbortSignal) {
+    async sendMessage(botId: string, message: string, signal?: AbortSignal, options?: { attachmentRefs?: readonly [string] }) {
       return runExclusive(async () => {
+        const refs = options?.attachmentRefs;
         const response = await requestRelay(
           config,
-          {
-            v: 1,
-            id: randomUUID(),
-            issued_at_ms: Date.now(),
-            op: "send_message",
-            args: { bot_id: botId, message },
-          },
+          refs === undefined
+            ? {
+                v: 1,
+                id: randomUUID(),
+                issued_at_ms: Date.now(),
+                op: "send_message",
+                args: { bot_id: botId, message },
+              }
+            : {
+                v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+                id: randomUUID(),
+                issued_at_ms: Date.now(),
+                op: "send_message",
+                args: { bot_id: botId, message, attachment_refs: [refs[0]] },
+              },
           signal,
         );
         if (!response.ok) throw remoteError(response);
@@ -336,6 +356,66 @@ export function createRelayTransport(config: PairingConfig): RelayTransport {
           throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
         }
         return { accepted: true, requestId: response.result.request_id };
+      }, signal);
+    },
+    async stageAttachment(input, signal) {
+      return runExclusive(async () => {
+        const response = await requestRelay(
+          config,
+          {
+            v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "attachment_stage",
+            args: input,
+          },
+          signal,
+        );
+        if (!response.ok) throw remoteError(response);
+        if (response.op !== "attachment_stage") {
+          throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
+        }
+        return response.result;
+      }, signal);
+    },
+    async commitAttachment(input, signal) {
+      return runExclusive(async () => {
+        const response = await requestRelay(
+          config,
+          {
+            v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "attachment_commit",
+            args: input,
+          },
+          signal,
+        );
+        if (!response.ok) throw remoteError(response);
+        if (response.op !== "attachment_commit") {
+          throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
+        }
+        return response.result;
+      }, signal);
+    },
+    async fetchAttachment(input, signal) {
+      return runExclusive(async () => {
+        const response = await requestRelay(
+          config,
+          {
+            v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "attachment_fetch",
+            args: input,
+          },
+          signal,
+        );
+        if (!response.ok) throw remoteError(response);
+        if (response.op !== "attachment_fetch") {
+          throw error("INVALID_RESPONSE", "Grok Bot relay returned the wrong response type.");
+        }
+        return response.result;
       }, signal);
     },
   };
