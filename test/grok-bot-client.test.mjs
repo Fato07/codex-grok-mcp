@@ -133,13 +133,15 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
     });
   });
   server.listen(0, "127.0.0.1");
-  await once(server, "listening");
+  server.unref();
   context.after(
     () =>
-      new Promise((resolve, reject) =>
-        server.close((caught) => (caught ? reject(caught) : resolve())),
-      ),
+      new Promise((resolve, reject) => {
+        server.closeAllConnections?.();
+        server.close((caught) => (caught ? reject(caught) : resolve()));
+      }),
   );
+  await once(server, "listening");
   const address = server.address();
   assert(address && typeof address === "object");
   const discoveryPath = join(root, "gateway.json");
@@ -409,6 +411,14 @@ test("gateway verification accepts genuine gateway with clock skew (VM pause)", 
   });
   
   gateway.listen(0, "127.0.0.1");
+  gateway.unref();
+  context.after(
+    () =>
+      new Promise((resolve) => {
+        gateway.closeAllConnections?.();
+        gateway.close(() => resolve());
+      }),
+  );
   await new Promise((resolve, reject) => {
     gateway.once("listening", resolve);
     gateway.once("error", reject);
@@ -425,12 +435,10 @@ test("gateway verification accepts genuine gateway with clock skew (VM pause)", 
     token: "test-token",
   });
   
-  const client = new LocalGrokBotClient({ discoveryPath });
+  const client = new LocalGrokBotClient({ discoveryPath, env: {} });
   const discovery = client.discovery();
   assert.equal(discovery.port, address.port);
   assert.equal(discovery.pid, process.pid);
-  
-  await new Promise((resolve) => gateway.close(resolve));
 });
 
 test("gateway verification fails for reused PID without listening socket", async (context) => {
@@ -449,8 +457,12 @@ test("gateway verification fails for reused PID without listening socket", async
   });
   
   assert.throws(
-    () => new LocalGrokBotClient({ discoveryPath }).discovery(),
-    { code: "GATEWAY_VERIFICATION_FAILED" },
+    () => new LocalGrokBotClient({ discoveryPath, env: {} }).discovery(),
+    (caught) => {
+      assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "GATEWAY_VERIFICATION_FAILED");
+      return true;
+    },
   );
 });
 
@@ -467,6 +479,14 @@ test("gateway verification rejects descriptor startedAt in the future", async (c
   });
   
   gateway.listen(0, "127.0.0.1");
+  gateway.unref();
+  context.after(
+    () =>
+      new Promise((resolve) => {
+        gateway.closeAllConnections?.();
+        gateway.close(() => resolve());
+      }),
+  );
   await new Promise((resolve, reject) => {
     gateway.once("listening", resolve);
     gateway.once("error", reject);
@@ -483,9 +503,55 @@ test("gateway verification rejects descriptor startedAt in the future", async (c
   });
   
   assert.throws(
-    () => new LocalGrokBotClient({ discoveryPath }).discovery(),
-    { code: "GATEWAY_VERIFICATION_FAILED" },
+    () => new LocalGrokBotClient({ discoveryPath, env: {} }).discovery(),
+    (caught) => {
+      assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "GATEWAY_VERIFICATION_FAILED");
+      return true;
+    },
   );
-  
-  await new Promise((resolve) => gateway.close(resolve));
+});
+
+test("env port or bind host that disagrees with gateway.json is a named mismatch", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-env-mismatch-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const discoveryPath = join(root, "gateway.json");
+  await writeSecureDiscovery(discoveryPath, {
+    port: 4137,
+    pid: 5137,
+    startedAt: 6137,
+    host: "127.0.0.1",
+    token: "gateway-test-token",
+  });
+
+  assert.throws(
+    () =>
+      new LocalGrokBotClient({
+        discoveryPath,
+        env: { SAND_HOST_PORT: "1340" },
+        verifyServer: () => true,
+      }),
+    (caught) => {
+      assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "CONFIG_INVALID");
+      assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+      assert.match(caught.message, /SAND_HOST_PORT/);
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      new LocalGrokBotClient({
+        discoveryPath,
+        env: { SAND_GATEWAY_BIND_HOST: "10.0.0.1" },
+        verifyServer: () => true,
+      }),
+    (caught) => {
+      assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "CONFIG_INVALID");
+      assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+      assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
+      return true;
+    },
+  );
 });

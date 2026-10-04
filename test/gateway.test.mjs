@@ -123,7 +123,7 @@ async function openMcp(env, { approvePingAll = false, server } = {}) {
   };
 }
 
-async function startGateway(handler) {
+async function startGateway(context, handler) {
   const requests = [];
   const server = createHttpServer(async (request, response) => {
     const chunks = [];
@@ -144,16 +144,23 @@ async function startGateway(handler) {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
   });
+  server.unref();
   const address = server.address();
   assert(address && typeof address === "object");
+  const close = () =>
+    new Promise((resolve, reject) => {
+      server.closeAllConnections?.();
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  context.after(() => close().catch(() => undefined));
 
   return {
     requests,
     url: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise((resolve, reject) => server.close((error) => {
-      if (error) reject(error);
-      else resolve();
-    })),
+    close,
   };
 }
 
@@ -164,9 +171,9 @@ function gatewayEnv(gateway) {
   };
 }
 
-test("direct read requires an explicit non-group Bot marker", async () => {
+test("direct read requires an explicit non-group Bot marker", async (context) => {
   let groupMarker = false;
-  const gateway = await startGateway(({ path }) => {
+  const gateway = await startGateway(context, ({ path }) => {
     if (path === "/api/listAgents") {
       const bot = {
         id: BOTS[0].id,
@@ -833,8 +840,8 @@ test("paired bridge status rejects an incomplete capability handshake", async ()
   }
 });
 
-test("configured gateway exposes roster and exact-ID send with an acceptance receipt", async () => {
-  const gateway = await startGateway(({ path }) => {
+test("configured gateway exposes roster and exact-ID send with an acceptance receipt", async (context) => {
+  const gateway = await startGateway(context, ({ path }) => {
     if (path === "/api/listAgents") {
       return {
         body: [
@@ -935,9 +942,9 @@ test("configured gateway exposes roster and exact-ID send with an acceptance rec
   }
 });
 
-test("ambiguous 409 send failures are not retried and remain outcome unknown", async () => {
+test("ambiguous 409 send failures are not retried and remain outcome unknown", async (context) => {
   let sendCount = 0;
-  const gateway = await startGateway(({ path }) => {
+  const gateway = await startGateway(context, ({ path }) => {
     if (path === "/api/listAgents") return { body: BOTS };
     if (path === "/api/sendPrompt") {
       sendCount += 1;
@@ -962,9 +969,9 @@ test("ambiguous 409 send failures are not retried and remain outcome unknown", a
   }
 });
 
-test("direct adapter marks every returned post-send status as delivery-uncertain", async () => {
+test("direct adapter marks every returned post-send status as delivery-uncertain", async (context) => {
   let status = 400;
-  const gateway = await startGateway(({ path }) => {
+  const gateway = await startGateway(context, ({ path }) => {
     if (path === "/api/sendPrompt") return { status, body: { error: "rejected" } };
     return { status: 404, body: { error: "not found" } };
   });
@@ -986,9 +993,9 @@ test("direct adapter marks every returned post-send status as delivery-uncertain
   }
 });
 
-test("ping-all preview performs no sends and stale or mismatched confirmation is rejected", async () => {
+test("ping-all preview performs no sends and stale or mismatched confirmation is rejected", async (context) => {
   let roster = BOTS.slice(0, 2);
-  const gateway = await startGateway(({ path }) => {
+  const gateway = await startGateway(context, ({ path }) => {
     if (path === "/api/listAgents") return { body: roster };
     if (path === "/api/sendPrompt") return { body: { accepted: true } };
     return { status: 404, body: { error: "not found" } };
@@ -1045,11 +1052,11 @@ test("ping-all preview performs no sends and stale or mismatched confirmation is
   }
 });
 
-test("confirmed ping-all sends sequentially once per Bot and returns per-Bot receipts", async () => {
+test("confirmed ping-all sends sequentially once per Bot and returns per-Bot receipts", async (context) => {
   let activeSends = 0;
   let maxActiveSends = 0;
   const sendBodies = [];
-  const gateway = await startGateway(async ({ path, body }) => {
+  const gateway = await startGateway(context, async ({ path, body }) => {
     if (path === "/api/listAgents") return { body: BOTS };
     if (path !== "/api/sendPrompt") return { status: 404, body: { error: "not found" } };
 

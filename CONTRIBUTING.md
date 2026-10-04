@@ -18,7 +18,7 @@ npm ci --prefix relay
 npm run test:all
 ```
 
-`npm run doctor` is optional and requires a local Grok CLI login. It checks setup without sending a model request. Live tests must use your own account and data you are allowed to share; automated tests must use mocks.
+`npm run doctor` is optional and requires a local Grok CLI login. It checks setup without sending a model request. Live tests must use your own account and data you are allowed to share; automated tests must use mocks. See [TESTING.md](TESTING.md) for hermetic setup, offline staging, macOS skips, and the uid-65534 sandbox caveat.
 
 ## Pull requests
 

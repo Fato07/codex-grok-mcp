@@ -787,9 +787,11 @@ export async function runBridgeCompanion(
           ? caught.code
           : `${command ?? "bridge"}_failed`;
     const reason =
-      caught instanceof LocalGatewayError && caught.reason === "DATA_ROOT_SYMLINK"
+      caught instanceof LocalGatewayError && caught.reason !== undefined
         ? caught.reason
-        : undefined;
+        : caught instanceof BridgeLifecycleError && caught.reason !== undefined
+          ? caught.reason
+          : undefined;
     stderr.write(
       `${JSON.stringify({ error, ...(reason === undefined ? {} : { reason }) })}\n`,
     );

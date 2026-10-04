@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WebSocketServer } from "ws";
+import { BridgeLifecycleError } from "../dist/bridge-lifecycle.js";
 import {
   handleBridgeRequest,
   runBridge,
@@ -151,6 +152,26 @@ test("probe names a symlinked SAND_DATA_ROOT without leaking paths", async (cont
   assert.equal(stdout, "");
   assert.equal(stderr, '{"error":"CONFIG_INVALID","reason":"DATA_ROOT_SYMLINK"}\n');
   assert(!stderr.includes(sandbox));
+});
+
+test("lifecycle errors pass a release-tree reason through the companion", async () => {
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await runBridgeCompanion(["update"], {
+    lifecycle: {
+      run: async () => {
+        throw new BridgeLifecycleError("candidate_invalid", "RELEASE_TREE_GROUP_WRITABLE");
+      },
+    },
+    stdout: { write: (chunk) => (stdout += chunk) },
+    stderr: { write: (chunk) => (stderr += chunk) },
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(stdout, "");
+  assert.equal(
+    stderr,
+    '{"error":"candidate_invalid","reason":"RELEASE_TREE_GROUP_WRITABLE"}\n',
+  );
 });
 
 test("companion routes the bounded lifecycle surface without touching pairing", async () => {
