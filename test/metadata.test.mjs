@@ -211,11 +211,22 @@ test("npm pack excludes attachment test-hooks files", async () => {
       await writeFile(join(packedDist, name), await readFile(join(sourceDist, name)));
     }
     await writeFile(join(pkgDir, "package.json"), `${JSON.stringify(packed, null, 2)}\n`);
-    const { stdout } = await execFileAsync("npm", ["pack", "--json", `--pack-destination=${dest}`], {
-      cwd: pkgDir,
-      encoding: "utf8",
-      env: { ...process.env, npm_config_update_notifier: "false" },
-    });
+    const { stdout } = await execFileAsync(
+      "npm",
+      ["pack", "--json", "--ignore-scripts", `--pack-destination=${dest}`],
+      {
+        cwd: pkgDir,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TMPDIR: process.env.TMPDIR,
+          INIT_CWD: pkgDir,
+          npm_config_update_notifier: "false",
+          npm_config_ignore_scripts: "true",
+        },
+      },
+    );
     const packs = JSON.parse(stdout);
     const files = packs[0]?.files?.map((entry) => entry.path) ?? [];
     assert.equal(
