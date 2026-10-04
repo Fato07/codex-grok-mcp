@@ -671,7 +671,12 @@ async function connectOnce(
       clearLiveness();
       signal?.removeEventListener("abort", onAbort);
       socket.removeAllListeners();
-      socket.terminate();
+      socket.on("error", () => undefined);
+      try {
+        socket.terminate();
+      } catch {
+        // CONNECTING terminate emits or throws on some Node/ws pairs.
+      }
       resolve();
     };
     const onAbort = (): void => finish();
