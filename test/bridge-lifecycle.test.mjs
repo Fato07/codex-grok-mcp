@@ -239,6 +239,25 @@ async function assertBindingsAbsent(root, configPath) {
   await assert.rejects(lstat(`${configPath}.lifecycle.json`), { code: "ENOENT" });
 }
 
+async function assertNoStagingLeftovers(root) {
+  const names = await readdir(root).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  assert.deepEqual(
+    names.filter((name) => name.startsWith(".stage-")),
+    [],
+  );
+  const releaseNames = await readdir(join(root, "releases")).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  assert.deepEqual(
+    releaseNames.filter((name) => name.startsWith(".stage-")),
+    [],
+  );
+}
+
 async function runDefaultLifecycle(command, environment) {
   const moduleUrl = pathToFileURL(join(process.cwd(), "dist", "bridge-lifecycle.js")).href;
   const source = `
@@ -247,7 +266,7 @@ async function runDefaultLifecycle(command, environment) {
       const result = await new BridgeLifecycle().run(${JSON.stringify(command)});
       process.stdout.write(JSON.stringify({ ok: true, state: result.state }) + "\\n");
     } catch (error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: error?.message }) + "\\n");
+      process.stdout.write(JSON.stringify({ ok: false, error: error?.code ?? error?.message, message: error?.message }) + "\\n");
       process.exitCode = 1;
     }
   `;
@@ -629,9 +648,16 @@ test("default lifecycle rejects config, replay, and Grok data beneath releases",
     } else {
       environment.SAND_DATA_ROOT = join(releases, "sand-data");
     }
+    const configDir = join(environment.XDG_CONFIG_HOME, "codex-grok-mcp");
+    await mkdir(configDir, { recursive: true, mode: 0o700 });
+    await savePairingConfig(
+      parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+      join(configDir, "bridge.json"),
+    );
     const attempt = await runDefaultLifecycle("install", environment);
     assert.equal(attempt.code, 1);
-    assert.deepEqual(attempt.result, { ok: false, error: "lifecycle_state_invalid" });
+    assert.equal(attempt.result.ok, false);
+    assert.equal(attempt.result.error, "lifecycle_state_invalid");
     assert.equal(await readFile(sentinel, "utf8"), "keep\n");
   }
 });
@@ -1089,7 +1115,7 @@ for (const command of ["update", "rollback"]) {
   });
 }
 
-test("failed target start restores the retained release without publishing bindings", async (context) => {
+test("failed target start from stale leaves the retained release stopped without publishing bindings", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-restore-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const configPath = join(root, "config", "bridge.json");
@@ -1100,34 +1126,20 @@ test("failed target start restores the retained release without publishing bindi
   controls.setCurrent(target);
   controls.setFailStart(target.version, "candidate_start_failed");
 
-  await assert.rejects(lifecycle.run("update"), { message: "update_failed_restored" });
-  assert.deepEqual(actions, [
-    `preflight:${target.version}`,
-    "recover-stale",
-    `start:${target.version}`,
-    `start:${retained.version}`,
-  ]);
-  await assertBindingsAbsent(root, configPath);
-  assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
-
-  controls.setStatus({
-    state: "stale",
-    managed: true,
-    companionVersion: retained.version,
-    protocolVersions: [...retained.protocol_versions],
-    releaseIntegrity: retained.integrity,
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
   });
-  actions.length = 0;
-  controls.setFailStart("*", "candidate_start_failed");
-  await assert.rejects(lifecycle.run("update"), { message: "restore_failed" });
   assert.deepEqual(actions, [
     `preflight:${target.version}`,
     "recover-stale",
     `start:${target.version}`,
-    `start:${retained.version}`,
   ]);
   await assertBindingsAbsent(root, configPath);
   assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
+  await assertNoStagingLeftovers(root);
+  assert.equal((await lifecycle.run("status")).state, "stopped");
 });
 
 test("uncertain target start from stale publishes nothing", async (context) => {
@@ -1444,11 +1456,16 @@ test("a pre-activation failure restores the retained release exactly once", asyn
   context.after(() => rm(root, { recursive: true, force: true }));
   const { lifecycle, controls, actions } = harness(root);
   await lifecycle.run("install");
+  const stateBefore = await readFile(join(root, "state.json"));
   controls.setCurrent(release("0.2.0-beta.6", 2));
   controls.setFailStart("0.2.0-beta.6", "candidate_start_failed");
   const before = actions.length;
 
-  await assert.rejects(lifecycle.run("update"), { message: "update_failed_restored" });
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
   assert.deepEqual(actions.slice(before), [
     "preflight:0.2.0-beta.6",
     "stop",
@@ -1459,6 +1476,161 @@ test("a pre-activation failure restores the retained release exactly once", asyn
   assert.equal(status.state, "running");
   assert.equal(status.active_version, "0.2.0-beta.5");
   assert.equal(status.previous_version, null);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed update start from stopped leaves the retained release stopped", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-update-stopped-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  const retained = release("0.2.0-beta.5", 1);
+  const target = release("0.2.0-beta.6", 2);
+  await lifecycle.run("install");
+  await lifecycle.run("stop");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setCurrent(target);
+  controls.setFailStart(target.version, "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    `preflight:${target.version}`,
+    `start:${target.version}`,
+  ]);
+  const status = await lifecycle.run("status");
+  assert.equal(status.state, "stopped");
+  assert.equal(status.active_version, retained.version);
+  assert.equal(status.previous_version, null);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed rollback start from running restores the retained release", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-rollback-running-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  const previous = release("0.2.0-beta.5", 1);
+  const current = release("0.2.0-beta.6", 2);
+  await lifecycle.run("install");
+  controls.setCurrent(current);
+  await lifecycle.run("update");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setFailStart(previous.version, "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("rollback"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    `preflight:${previous.version}`,
+    "stop",
+    `start:${previous.version}`,
+    `start:${current.version}`,
+  ]);
+  const status = await lifecycle.run("status");
+  assert.equal(status.state, "running");
+  assert.equal(status.active_version, current.version);
+  assert.equal(status.previous_version, previous.version);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed rollback start from stopped leaves the retained release stopped", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-rollback-stopped-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  const previous = release("0.2.0-beta.5", 1);
+  const current = release("0.2.0-beta.6", 2);
+  await lifecycle.run("install");
+  controls.setCurrent(current);
+  await lifecycle.run("update");
+  await lifecycle.run("stop");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setFailStart(previous.version, "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("rollback"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    `preflight:${previous.version}`,
+    `start:${previous.version}`,
+  ]);
+  const status = await lifecycle.run("status");
+  assert.equal(status.state, "stopped");
+  assert.equal(status.active_version, current.version);
+  assert.equal(status.previous_version, previous.version);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed restore start from running still returns restore_failed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-restore-failed-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  await lifecycle.run("install");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setCurrent(release("0.2.0-beta.6", 2));
+  controls.setFailStart("*", "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "restore_failed");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    "preflight:0.2.0-beta.6",
+    "stop",
+    "start:0.2.0-beta.6",
+    "start:0.2.0-beta.5",
+  ]);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("install before pairing fails with PAIRING_REQUIRED and writes nothing", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-pairing-required-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const dataHome = join(parent, "data");
+  const configHome = join(parent, "config");
+  const environment = {
+    ...process.env,
+    XDG_DATA_HOME: dataHome,
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: join(parent, "state"),
+    SAND_DATA_ROOT: join(parent, "sand-data"),
+  };
+  delete environment.SAND_USER_DATA_DIR;
+
+  const attempt = await runDefaultLifecycle("install", environment);
+  assert.equal(attempt.code, 1);
+  assert.equal(attempt.result.ok, false);
+  assert.equal(attempt.result.error, "PAIRING_REQUIRED");
+  assert.match(attempt.result.message, /pair first/i);
+
+  const root = join(dataHome, "codex-grok-mcp", "companion");
+  const configPath = join(configHome, "codex-grok-mcp", "bridge.json");
+  await assert.rejects(lstat(join(root, "releases")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "binding.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "state.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "lifecycle-control")), { code: "ENOENT" });
+  await assert.rejects(lstat(`${join(root, "lifecycle-control")}.lock`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle.json`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lock`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle-control`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle-control.lock`), { code: "ENOENT" });
+  await assert.rejects(lstat(companionLeasePath(configPath)), { code: "ENOENT" });
+  await assertNoStagingLeftovers(root);
 });
 
 test("an ambiguous activation never triggers an automatic second cutover", async (context) => {

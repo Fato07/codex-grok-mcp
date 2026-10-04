@@ -21,6 +21,8 @@ Prerelease. Stable `0.2.0` is not published; this beta carries every change sinc
 
 - The installed-package candidate check no longer runs the build under npm 9/10, and npx's `npm_execpath` pointing at `npx-cli.js` is resolved to a sibling `npm-cli.js` when present.
 - A whitespace-padded `SAND_USER_DATA_DIR` is trimmed before it is resolved (`sandUserDataDir` in `src/grok-bot-client.ts`, used by `managedChildEnvironment`). Previously `'  /srv/u  '` was resolved relative to cwd.
+- A failed `update` or `rollback` target start restores the prior run state: the retained release is restarted only if the companion was running before the switch. A stopped companion stays stopped (`update_failed_restored`); `state.json` is unchanged and staging leftovers are removed.
+- `install` without a valid pairing now fails with `PAIRING_REQUIRED` before staging a release, writing bindings, or taking a lease, and leaves nothing on disk.
 
 ### Verified boundaries
 

@@ -16,6 +16,8 @@ The published-closure staging test makes a live `HEAD` request to `registry.npmj
 
 A failed target stage before the switch during `update` or `rollback` from stale makes no state change except the existing lifecycle-root `0700` tightening. The stale lease, bindings, and release tree stay as they were; no child is started.
 
+A failed target start during `update` or `rollback` restores the prior run state: a previously running companion is restarted on the retained release (`update_failed_restored`, or `restore_failed` if that restart fails); a previously stopped companion stays stopped (`update_failed_restored`). `state.json` is unchanged and staging leftovers are removed. `install` without a valid pairing fails with `PAIRING_REQUIRED` before creating a release directory, binding files, or a lease.
+
 ## macOS skips
 
 Linux-only tests skip on macOS. The Linux total must equal macOS pass + skip. Current Linux-only names:
