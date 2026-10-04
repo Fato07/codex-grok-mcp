@@ -13,21 +13,37 @@ function touchesRealRoot(value) {
   return roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
 }
 
+function deny(name, filePath) {
+  hits.push(`${name}:${filePath}`);
+  const err = new Error(`REAL_ROOT_SYSCALL ${name}:${filePath}`);
+  err.code = "EPERM";
+  return err;
+}
+
 function wrap(target, name) {
   const original = target[name];
   if (typeof original !== "function") return;
-  target[name] = function wrappedFsCall(...args) {
-    if (touchesRealRoot(args[0])) hits.push(`${name}:${args[0]}`);
+  const wrapped = function wrappedFsCall(...args) {
+    if (touchesRealRoot(args[0])) {
+      const err = deny(name, args[0]);
+      const cb = args[args.length - 1];
+      if (typeof cb === "function") {
+        queueMicrotask(() => cb(err));
+        return;
+      }
+      throw err;
+    }
     return original.apply(this, args);
   };
-  Object.defineProperty(target[name], "name", { value: original.name });
+  Object.defineProperty(wrapped, "name", { value: original.name });
+  target[name] = wrapped;
 }
 
 if (globalThis[MARK] !== true) {
   globalThis[MARK] = true;
   const originalRealpathNative =
     typeof fs.realpathSync === "function" && typeof fs.realpathSync.native === "function"
-      ? fs.realpathSync.native
+      ? fs.realpathSync.native.bind(fs.realpathSync)
       : undefined;
   for (const name of [
     "lstatSync",
@@ -45,9 +61,9 @@ if (globalThis[MARK] !== true) {
     wrap(fs.promises, name);
   }
   if (originalRealpathNative !== undefined) {
-    fs.realpathSync.native = function wrappedRealpathNative(...args) {
-      if (touchesRealRoot(args[0])) hits.push(`realpathSync.native:${args[0]}`);
-      return originalRealpathNative.apply(this, args);
+    fs.realpathSync.native = function wrappedRealpathNative(filePath, options) {
+      if (touchesRealRoot(filePath)) throw deny("realpathSync.native", filePath);
+      return originalRealpathNative(filePath, options);
     };
   }
   process.on("exit", () => {

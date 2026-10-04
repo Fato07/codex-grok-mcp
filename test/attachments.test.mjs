@@ -1963,9 +1963,12 @@ validateLocalAttachmentFile(file, "ok.txt", { HOME: home, SAND_DATA_ROOT: sand }
 `,
   );
   const spy = fileURLToPath(new URL("./real-root-fs-spy.cjs", import.meta.url));
-  const traced = spawnSync(process.execPath, ["--require", spy, script], {
+  const env = { ...process.env };
+  const alreadyLoaded = (env.NODE_OPTIONS ?? "").includes("real-root-fs-spy");
+  const traced = spawnSync(process.execPath, alreadyLoaded ? [script] : ["--require", spy, script], {
     encoding: "utf8",
-    env: process.env,
+    env,
+    timeout: 15_000,
   });
   assert.equal(traced.status, 0, traced.stderr);
   assert.equal(traced.stderr.includes("REAL_ROOT_SYSCALLS"), false, traced.stderr);
