@@ -10,6 +10,7 @@ import { WebSocketServer } from "ws";
 import { BridgeLifecycleError } from "../dist/bridge-lifecycle.js";
 import {
   handleBridgeRequest,
+  RECONNECT_DELAYS_MS,
   runBridge,
   runBridgeCompanion,
 } from "../dist/bridge-companion.js";
@@ -1099,8 +1100,8 @@ test("a healthy relay that answers pings stays connected", async () => {
   }
 });
 
-test("reconnect backoff resets after each healthy handshake", async () => {
-  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-backoff-reset-"));
+test("accept-then-drop reconnects still back off up to 15 s", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-backoff-accept-drop-"));
   const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(relay, "listening");
   const address = relay.address();
@@ -1112,21 +1113,139 @@ test("reconnect backoff resets after each healthy handshake", async () => {
   const connections = [];
   relay.on("connection", (socket) => {
     connections.push(Date.now());
+    socket.close(4000, "replaced");
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 60_000,
+    pongDeadlineMs: 60_000,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: RECONNECT_DELAYS_MS,
+  });
+  try {
+    await waitForCount(connections, 6, 40_000);
+    const gaps = connections.slice(1).map((time, index) => time - connections[index]);
+    for (const [index, expected] of RECONNECT_DELAYS_MS.entries()) {
+      const gap = gaps[index];
+      assert(
+        gap >= expected - 250,
+        `accept-then-drop gap ${index} was ${gap}ms; expected at least ${expected}ms`,
+      );
+    }
+    assert(gaps[4] >= 14_000, `last accept-then-drop gap did not reach 15 s: ${gaps[4]}ms`);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("reconnect backoff resets to 1 s after a healthy connection drops", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-backoff-reset-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  relay.on("connection", (socket) => {
+    connections.push({ at: Date.now(), socket });
+    if (connections.length === 1) {
+      socket.once("message", () => socket.terminate());
+      socket.send(
+        encryptFrame(
+          config,
+          "codex",
+          JSON.stringify({
+            v: 1,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "list_bots",
+            args: {},
+          }),
+        ),
+      );
+      return;
+    }
     socket.terminate();
   });
   const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
-    pingIntervalMs: 10_000,
-    pongDeadlineMs: 10_000,
-    reconnectDelaysMs: [30, 250, 500],
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: [1_000, 8_000, 15_000],
   });
   try {
-    await waitForCount(connections, 4, 800);
-    const gaps = connections.slice(1).map((time, index) => time - connections[index]);
-    for (const gap of gaps) {
-      assert(gap < 150, `healthy reconnect used a later backoff slot: ${gap}ms`);
-    }
+    await waitForCount(connections, 2, 3_000);
+    const gap = connections[1].at - connections[0].at;
+    assert(gap >= 900, `healthy drop reconnected too fast: ${gap}ms`);
+    assert(gap < 2_500, `healthy drop did not reset to 1 s: ${gap}ms`);
   } finally {
     controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("inbound traffic resets the pong deadline and close clears liveness timers", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-liveness-inbound-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0, autoPong: false });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  relay.on("connection", (socket) => {
+    connections.push(socket);
+    const keepAlive = setInterval(() => {
+      if (socket.readyState !== socket.OPEN) {
+        clearInterval(keepAlive);
+        return;
+      }
+      socket.send(
+        encryptFrame(
+          config,
+          "codex",
+          JSON.stringify({
+            v: 1,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "list_bots",
+            args: {},
+          }),
+        ),
+      );
+    }, 20);
+    socket.on("close", () => clearInterval(keepAlive));
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: [20],
+  });
+  try {
+    await waitForCount(connections, 1, 500);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(connections.length, 1);
+    controller.abort();
+    await bridge;
+    const afterStop = connections.length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(connections.length, afterStop);
+  } finally {
+    if (!controller.signal.aborted) controller.abort();
     await bridge;
     await new Promise((resolve, reject) => {
       relay.close((caught) => (caught ? reject(caught) : resolve()));

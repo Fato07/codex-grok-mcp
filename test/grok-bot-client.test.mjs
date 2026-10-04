@@ -545,6 +545,7 @@ test("env port or bind host that disagrees with gateway.json is a named mismatch
       assert.equal(caught.code, "CONFIG_INVALID");
       assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
       assert.match(caught.message, /SAND_HOST_PORT/);
+      assert.doesNotMatch(caught.message, /SAND_GATEWAY_BIND_HOST/);
       return true;
     },
   );
@@ -559,6 +560,23 @@ test("env port or bind host that disagrees with gateway.json is a named mismatch
       assert(caught instanceof LocalGatewayError);
       assert.equal(caught.code, "CONFIG_INVALID");
       assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+      assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
+      assert.doesNotMatch(caught.message, /SAND_HOST_PORT/);
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      new LocalGrokBotClient({
+        discoveryPath,
+        env: { SAND_HOST_PORT: "1340", SAND_GATEWAY_BIND_HOST: "10.0.0.1" },
+        verifyServer: () => true,
+      }),
+    (caught) => {
+      assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "CONFIG_INVALID");
+      assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+      assert.match(caught.message, /SAND_HOST_PORT/);
       assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
       return true;
     },

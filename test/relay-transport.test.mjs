@@ -316,7 +316,7 @@ test("relay maps pairing authentication failures without retrying or downgrading
   }
 });
 
-test("relay surfaces GATEWAY_ENV_MISMATCH as a Codex-visible SAND_HOST_PORT restart error", async () => {
+test("relay surfaces GATEWAY_ENV_MISMATCH as a Codex-visible port or bind-host restart error", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(server, "listening");
   const address = server.address();
@@ -353,9 +353,56 @@ test("relay surfaces GATEWAY_ENV_MISMATCH as a Codex-visible SAND_HOST_PORT rest
       assert(caught instanceof GrokBotGatewayError);
       assert.equal(caught.code, "CONFIG_INVALID");
       assert.match(caught.message, /SAND_HOST_PORT/);
+      assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
       assert.match(caught.message, /restart/i);
       assert(!caught.message.includes(secretPath));
       assert(!caught.message.includes(config.relayToken));
+      return true;
+    });
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+  }
+});
+
+test("relay GATEWAY_ENV_MISMATCH wording covers a bind-host mismatch", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  server.on("connection", (socket) => {
+    socket.once("message", (data) => {
+      const request = JSON.parse(decryptFrame(config, "codex", data.toString()).toString("utf8"));
+      socket.send(
+        encryptFrame(
+          config,
+          "bridge",
+          JSON.stringify({
+            v: request.v,
+            id: request.id,
+            ok: false,
+            error: {
+              code: "CONFIG_INVALID",
+              delivery_may_have_occurred: false,
+              reason: "GATEWAY_ENV_MISMATCH",
+            },
+          }),
+        ),
+      );
+    });
+  });
+
+  try {
+    const transport = createRelayTransport(config);
+    await assert.rejects(transport.listBots(), (caught) => {
+      assert(caught instanceof GrokBotGatewayError);
+      assert.equal(caught.code, "CONFIG_INVALID");
+      assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
+      assert.doesNotMatch(caught.message, /only SAND_HOST_PORT/);
       return true;
     });
   } finally {

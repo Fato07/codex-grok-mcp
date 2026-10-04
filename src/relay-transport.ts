@@ -238,7 +238,7 @@ async function requestRelay(
 function remoteError(response: Extract<ReturnType<typeof bridgeResponseSchema.parse>, { ok: false }>): GrokBotGatewayError {
   const message =
     response.error.code === "CONFIG_INVALID" && response.error.reason === "GATEWAY_ENV_MISMATCH"
-      ? "SAND_HOST_PORT does not match gateway.json. Restart the companion with the corrected SAND_HOST_PORT."
+      ? "SAND_HOST_PORT or SAND_GATEWAY_BIND_HOST does not match gateway.json. Restart the companion with the corrected SAND_HOST_PORT or SAND_GATEWAY_BIND_HOST."
       : remoteErrorMessages[response.error.code];
   return error(response.error.code, message, {
     deliveryMayHaveOccurred: response.error.delivery_may_have_occurred,

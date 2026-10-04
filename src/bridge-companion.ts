@@ -81,11 +81,13 @@ const REPLAY_RETENTION_MS = REQUEST_FRESHNESS_MS * 2;
 const MAX_RECENT_REQUESTS = 1_024;
 export const RELAY_PING_INTERVAL_MS = 30_000;
 export const RELAY_PONG_DEADLINE_MS = 10_000;
+export const RELAY_HEALTHY_UPTIME_MS = 10_000;
 export const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 
 export type RunBridgeOptions = {
   pingIntervalMs?: number;
   pongDeadlineMs?: number;
+  healthyUptimeMs?: number;
   reconnectDelaysMs?: readonly number[];
 };
 
@@ -608,10 +610,10 @@ async function connectOnce(
   client: BridgeClient,
   state: BridgeRuntimeState,
   signal: AbortSignal | undefined,
-  liveness: { pingIntervalMs: number; pongDeadlineMs: number },
+  liveness: { pingIntervalMs: number; pongDeadlineMs: number; healthyUptimeMs: number },
 ): Promise<boolean> {
   if (signal?.aborted) return false;
-  let established = false;
+  let provenHealthy = false;
   await new Promise<void>((resolve) => {
     const socket = new WebSocket(bridgeSocketUrl(config), {
       followRedirects: false,
@@ -623,12 +625,18 @@ async function connectOnce(
     let settled = false;
     let pingTimer: ReturnType<typeof setInterval> | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let healthyTimer: ReturnType<typeof setTimeout> | undefined;
 
     const clearLiveness = (): void => {
       if (pingTimer !== undefined) clearInterval(pingTimer);
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (healthyTimer !== undefined) clearTimeout(healthyTimer);
       pingTimer = undefined;
       deadlineTimer = undefined;
+      healthyTimer = undefined;
+    };
+    const markHealthy = (): void => {
+      provenHealthy = true;
     };
     const noteInbound = (): void => {
       if (deadlineTimer !== undefined) {
@@ -641,7 +649,7 @@ async function connectOnce(
       deadlineTimer = setTimeout(() => finish(), liveness.pongDeadlineMs);
     };
     const startLiveness = (): void => {
-      established = true;
+      healthyTimer = setTimeout(markHealthy, liveness.healthyUptimeMs);
       pingTimer = setInterval(() => {
         if (socket.readyState !== WebSocket.OPEN) {
           finish();
@@ -669,7 +677,10 @@ async function connectOnce(
     const onAbort = (): void => finish();
     signal?.addEventListener("abort", onAbort, { once: true });
     socket.once("open", startLiveness);
-    socket.on("pong", noteInbound);
+    socket.on("pong", () => {
+      noteInbound();
+      markHealthy();
+    });
     socket.on("ping", noteInbound);
 
     socket.on("message", (data, isBinary) => {
@@ -680,6 +691,7 @@ async function connectOnce(
         try {
           const plaintext = decryptFrame(config, "codex", textFrame(data, isBinary));
           request = bridgeRequestSchema.parse(JSON.parse(plaintext.toString("utf8")));
+          markHealthy();
         } catch (caught) {
           const authenticationFailed =
             caught instanceof BridgePairingError && caught.code === "frame_auth_failed";
@@ -773,7 +785,7 @@ async function connectOnce(
     socket.once("close", finish);
     socket.once("error", finish);
   });
-  return established;
+  return provenHealthy;
 }
 
 function waitForReconnect(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -804,6 +816,7 @@ export async function runBridge(
   let attempt = 0;
   const pingIntervalMs = options.pingIntervalMs ?? RELAY_PING_INTERVAL_MS;
   const pongDeadlineMs = options.pongDeadlineMs ?? RELAY_PONG_DEADLINE_MS;
+  const healthyUptimeMs = options.healthyUptimeMs ?? RELAY_HEALTHY_UPTIME_MS;
   const reconnectDelaysMs = options.reconnectDelaysMs ?? RECONNECT_DELAYS_MS;
   const state: BridgeRuntimeState = {
     activeHandlers: new Set(),
@@ -822,6 +835,7 @@ export async function runBridge(
       const established = await connectOnce(config, client, state, signal, {
         pingIntervalMs,
         pongDeadlineMs,
+        healthyUptimeMs,
       });
       if (signal?.aborted) break;
       if (established) attempt = 0;

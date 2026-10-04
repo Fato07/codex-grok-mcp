@@ -278,29 +278,30 @@ function assertGatewayEnvMatchesDiscovery(
   file: z.infer<typeof discoveryFileSchema> | undefined,
 ): void {
   if (file === undefined) return;
+  const mismatches: string[] = [];
   const envPort = readPort(env.SAND_HOST_PORT);
   if (envPort !== undefined && envPort !== file.port) {
-    throw new LocalGatewayError(
-      "CONFIG_INVALID",
-      0,
-      "",
-      "GATEWAY_ENV_MISMATCH",
-      "SAND_HOST_PORT does not match gateway.json",
-    );
+    mismatches.push("SAND_HOST_PORT");
   }
   const envHost = env.SAND_GATEWAY_BIND_HOST?.trim();
   if (envHost !== undefined && envHost !== "") {
     const fileHost = file.host?.trim() ?? "127.0.0.1";
     if (normalizeGatewayHost(envHost) !== normalizeGatewayHost(fileHost)) {
-      throw new LocalGatewayError(
-        "CONFIG_INVALID",
-        0,
-        "",
-        "GATEWAY_ENV_MISMATCH",
-        "SAND_GATEWAY_BIND_HOST does not match gateway.json",
-      );
+      mismatches.push("SAND_GATEWAY_BIND_HOST");
     }
   }
+  if (mismatches.length === 0) return;
+  const which =
+    mismatches.length === 2
+      ? "SAND_HOST_PORT and SAND_GATEWAY_BIND_HOST"
+      : mismatches[0]!;
+  throw new LocalGatewayError(
+    "CONFIG_INVALID",
+    0,
+    "",
+    "GATEWAY_ENV_MISMATCH",
+    `${which} does not match gateway.json`,
+  );
 }
 
 function readDiscovery(path: string): z.infer<typeof discoveryFileSchema> | undefined {

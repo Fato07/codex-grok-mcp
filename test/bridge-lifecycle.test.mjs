@@ -1623,6 +1623,7 @@ test("install before pairing fails with PAIRING_REQUIRED and writes nothing", as
   assert.equal(attempt.result.ok, false);
   assert.equal(attempt.result.error, "PAIRING_REQUIRED");
   assert.match(attempt.result.message, /pair first/i);
+  assert.deepEqual(await readdir(parent), []);
 
   const root = join(dataHome, "codex-grok-mcp", "companion");
   const configPath = join(configHome, "codex-grok-mcp", "bridge.json");
