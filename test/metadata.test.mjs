@@ -205,7 +205,6 @@ test("npm pack excludes attachment test-hooks files", async () => {
   try {
     const pkgDir = join(dest, "src-pkg");
     const packed = JSON.parse(await readFile(join(repo, "package.json"), "utf8"));
-    delete packed.scripts?.prepare;
     delete packed.scripts?.prepublishOnly;
     const packedDist = join(pkgDir, "dist");
     await mkdir(packedDist, { recursive: true });

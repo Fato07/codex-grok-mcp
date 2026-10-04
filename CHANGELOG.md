@@ -20,6 +20,7 @@ Prerelease. Stable `0.2.0` is not published; this beta carries every change sinc
 ### Fixed
 
 - The installed-package candidate check no longer runs the build under npm 9/10, and npx's `npm_execpath` pointing at `npx-cli.js` is resolved to a sibling `npm-cli.js` when present.
+- A whitespace-padded `SAND_USER_DATA_DIR` is trimmed before it is resolved (`sandUserDataDir` in `src/grok-bot-client.ts`, used by `managedChildEnvironment`). Previously `'  /srv/u  '` was resolved relative to cwd.
 
 ### Verified boundaries
 

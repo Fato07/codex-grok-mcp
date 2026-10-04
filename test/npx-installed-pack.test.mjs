@@ -198,7 +198,17 @@ test("npx offline tarball install gets past the candidate pack check", async (co
   }
 
   const packed = JSON.parse(
-    runNpm(["pack", "--json", "--pack-destination", packDest], { cwd: process.cwd() }).stdout,
+    runNpm(["pack", "--json", "--ignore-scripts", "--pack-destination", packDest], {
+      cwd: process.cwd(),
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        INIT_CWD: packDest,
+        npm_config_update_notifier: "false",
+        npm_config_ignore_scripts: "true",
+      },
+    }).stdout,
   );
   assert.equal(packed.length, 1);
   const tarball = join(packDest, packed[0].filename);
