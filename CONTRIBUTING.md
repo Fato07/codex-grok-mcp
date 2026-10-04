@@ -18,6 +18,8 @@ npm ci --prefix relay
 npm run test:all
 ```
 
+`npm ci` installs dependencies and does not compile. `npm test` runs `tsc` before the suite. `npm pack` and `npm publish` compile through `prepack`. There is no `prepare` script: npm 9/10 run `prepare` when packing a directory even with `--ignore-scripts`, and that path is used to restage an npx-extracted install.
+
 `npm run doctor` is optional and requires a local Grok CLI login. It checks setup without sending a model request. Live tests must use your own account and data you are allowed to share; automated tests must use mocks. See [TESTING.md](TESTING.md) for hermetic setup, offline staging, macOS skips, and the uid-65534 sandbox caveat.
 
 ## Pull requests

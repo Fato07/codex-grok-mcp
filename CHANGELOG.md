@@ -26,7 +26,7 @@ Prerelease. Stable `0.2.0` is not published; this beta carries every change sinc
 - Migrate a release tree restored with legacy `0755` directories to `0700` instead of failing every start with `candidate_invalid`; any other unsafe shape fails closed with a named `RELEASE_TREE_*` reason and no mode change.
 - Accept the genuine local gateway after the VM is paused and resumed: gateway verification no longer compares the descriptor start time against a process start time that drifts across pauses, and still requires the descriptor PID to own the listening socket (`GATEWAY_VERIFICATION_FAILED` otherwise).
 - Report `SAND_HOST_PORT` / `SAND_GATEWAY_BIND_HOST` disagreement with the gateway descriptor as an explicit `GATEWAY_ENV_MISMATCH` (`candidate_invalid` with that reason in managed preflight).
-- update/install work when launched via npx (npm_execpath pointing at npx-cli.js)
+- The installed-package candidate check no longer runs the build under npm 9/10, and npx's `npm_execpath` pointing at `npx-cli.js` is resolved to a sibling `npm-cli.js` when present.
 
 ### Changed
 

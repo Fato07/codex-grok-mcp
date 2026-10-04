@@ -82,7 +82,7 @@ This gate proves the unchanged local marketplace, plugin manifest, exact tarball
 
 ### Clean candidate flow
 
-- [ ] Copy the recorded tarball to each authorized test environment without renaming or rebuilding it, verify its SHA-512 locally, and invoke it with `npx --yes --package=/absolute/path/to/codex-grok-mcp-0.2.0.tgz -- <command>`. `npm exec --yes --package=<tgz> -- codex-grok-bridge update` is equivalent.
+- [ ] Copy the recorded tarball to each authorized test environment without renaming or rebuilding it, verify its SHA-512 locally, and invoke it with `npx --yes --package=/absolute/path/to/codex-grok-mcp-0.2.0.tgz -- <command>`. `npx` sets `npm_execpath` to `npx-cli.js`; the bridge maps that to a sibling `npm-cli.js` when present. The package has no `prepare` script, so npm 9/10 do not run a build while packing the extracted install.
 - [ ] On a clean host, install the exact candidate, start a fresh Codex task, discover the tools, run doctor, and complete one isolated `grok_ask` call.
 - [ ] On a clean host and VM, create a new pairing without exposing it, then probe and start the exact candidate companion.
 - [ ] From a fresh Codex task, verify status, list, bounded read, bounded wait, and one send to one exact non-group Bot ID with no retry.

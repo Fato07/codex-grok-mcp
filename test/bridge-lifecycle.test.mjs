@@ -35,6 +35,7 @@ import {
   managedChildEnvironment,
   migrateReleaseTreePermissions,
   npmCommand,
+  npmLifecycleEnvironment,
   preflightLifecycleRelease,
   stageLifecycleRelease,
   startLifecycleRelease,
@@ -2084,6 +2085,10 @@ test("npmCommand falls back to PATH npm when npm_execpath is unset", () => {
     command: "npm",
     args: ["pack", "--dry-run"],
   });
+});
+
+test("npmLifecycleEnvironment forces ignore-scripts for child npm", () => {
+  assert.equal(npmLifecycleEnvironment({ PATH: "/bin" }).npm_config_ignore_scripts, "true");
 });
 
 test("candidate pack check invoked through npx-cli sibling is pack", async (context) => {

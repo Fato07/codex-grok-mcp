@@ -49,7 +49,7 @@
     "test:relay": "npm --prefix relay run check && npm --prefix relay test",
     "test:all": "npm test && npm run test:relay",
     "prepublishOnly": "npm --prefix relay ci && npm run test:all",
-    "prepare": "npm run build"
+    "prepack": "npm run build"
   },
   "keywords": [
     "codex",

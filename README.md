@@ -213,7 +213,7 @@ npx --yes --package "codex-grok-mcp@${NEXT_VERSION}" -- codex-grok-bridge update
 npx --yes --package "codex-grok-mcp@${NEXT_VERSION}" -- codex-grok-bridge rollback
 ```
 
-`npm exec --yes --package=<tgz> -- codex-grok-bridge update` is equivalent.
+When that update is launched through `npx`, `npm_execpath` is `npx-cli.js`; the bridge uses a sibling `npm-cli.js` when that regular file exists so the candidate pack still runs as `npm pack`. The published package builds from `prepack`, not `prepare`, so npm 9/10 do not compile during an installed-directory pack.
 
 The rollback operation uses the retained release, and a repeated rollback is a no-op. Pairing is read and revalidated, never rewritten. For VM resume recovery, a Grok Bot routine may run the exact pinned `ensure` command. Routine creation remains an explicit operator action.
 

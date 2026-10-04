@@ -1174,6 +1174,12 @@ export function npmCommand(
   return { command: "npm", args };
 }
 
+export function npmLifecycleEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return { ...environment, npm_config_ignore_scripts: "true" };
+}
+
 type PackedLifecyclePackage = {
   filename: string;
   integrity: string;
@@ -1520,6 +1526,7 @@ export async function stageLifecycleRelease(
     (
       await runProcess(previewCommand.command, previewCommand.args, {
         cwd: packageSnapshot.path,
+        env: npmLifecycleEnvironment(),
       }).catch(() => fail("install_failed"))
     ).stdout,
   );
@@ -1550,7 +1557,12 @@ export async function stageLifecycleRelease(
       packageSnapshot.path,
     ]);
     const packed = parsePackedLifecyclePackage(
-      (await runProcess(pack.command, pack.args, { cwd: staging })).stdout,
+      (
+        await runProcess(pack.command, pack.args, {
+          cwd: staging,
+          env: npmLifecycleEnvironment(),
+        })
+      ).stdout,
     );
     if (!samePackedPackage(preview, packed)) fail("candidate_invalid");
     await assertPackageRootUnchanged(packageSnapshot);
@@ -1586,7 +1598,10 @@ export async function stageLifecycleRelease(
       "--save-exact",
       packedPath,
     ]);
-    await runProcess(install.command, install.args, { cwd: staging });
+    await runProcess(install.command, install.args, {
+      cwd: staging,
+      env: npmLifecycleEnvironment(),
+    });
     const installedPackage = await readRegularJson(
       join(staging, "node_modules", PACKAGE_NAME, "package.json"),
       MAX_PACKAGE_JSON_BYTES,
