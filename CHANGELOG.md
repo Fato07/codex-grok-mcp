@@ -20,7 +20,7 @@ All notable changes will be documented here. This project follows [Semantic Vers
 
 ### Changed
 
-- A failed target stage or other failure before the switch during `update` or `rollback` from stale is a no-op. The stale lease, bindings, and release tree stay as they were; no child is started; the original staging or preflight error is returned unchanged. Earlier builds restarted the retained release when staging failed.
+- A failed target stage or other failure before the switch during `update` or `rollback` from stale makes no state change except the existing lifecycle-root `0700` tightening. The stale lease, bindings, and release tree stay as they were; no child is started; the original staging or preflight error is returned unchanged. Earlier builds restarted the retained release when staging failed.
 
 ### Verified boundaries
 

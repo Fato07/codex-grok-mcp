@@ -19,7 +19,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dirname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
@@ -1177,29 +1178,73 @@ test("version_conflict from stale fails before any action", async (context) => {
   await assertBindingsAbsent(root, configPath);
 });
 
-async function snapshotStaleSurface(root, configPath, dirs, status) {
-  const detailsOf = async (path) => {
+function leaseToken() {
+  return randomBytes(32).toString("base64url");
+}
+
+async function writeStaleManagedLease(configPath, candidate) {
+  const lockPath = companionLeasePath(configPath);
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await writeFile(
+    lockPath,
+    `${JSON.stringify({
+      version: 2,
+      pid: 999_999,
+      process_start_id: "linux:00000000-0000-0000-0000-000000000000:1",
+      owner_token: leaseToken(),
+      launch_token: leaseToken(),
+      mode: "managed",
+      companion_version: candidate.version,
+      protocol_versions: [...candidate.protocol_versions],
+      release_integrity: candidate.integrity,
+    })}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+  return lockPath;
+}
+
+async function readMaybeFile(path) {
+  try {
+    return (await readFile(path)).toString("base64");
+  } catch (caught) {
+    if (caught?.code === "ENOENT") return null;
+    throw caught;
+  }
+}
+
+async function listTreeModes(rootPath) {
+  const entries = [];
+  const walk = async (path) => {
     const details = await lstat(path);
-    return {
+    entries.push({
+      path: relative(rootPath, path) || ".",
       mode: details.mode & 0o7777,
-      uid: details.uid,
       symlink: details.isSymbolicLink(),
-      nlink: details.nlink,
-    };
+      kind: details.isDirectory() ? "dir" : details.isFile() ? "file" : "other",
+    });
+    if (details.isDirectory() && !details.isSymbolicLink()) {
+      for (const name of (await readdir(path)).sort()) {
+        await walk(join(path, name));
+      }
+    }
   };
+  try {
+    await walk(rootPath);
+  } catch (caught) {
+    if (caught?.code !== "ENOENT") throw caught;
+  }
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function snapshotOnDiskLifecycle(root, configPath) {
   return {
-    state: await readFile(join(root, "state.json"), "utf8"),
-    names: (await readdir(root)).sort(),
-    modes: Object.fromEntries(
-      await Promise.all(dirs.map(async (dir) => [dir, await detailsOf(dir)])),
-    ),
-    status: structuredClone(status),
-    configBinding: await lstat(`${configPath}.lifecycle.json`)
-      .then(() => "present")
-      .catch(() => "absent"),
-    rootBinding: await lstat(join(root, "binding.json"))
-      .then(() => "present")
-      .catch(() => "absent"),
+    leaseBytes: await readMaybeFile(companionLeasePath(configPath)),
+    configBinding: await readMaybeFile(`${configPath}.lifecycle.json`),
+    rootBinding: await readMaybeFile(join(root, "binding.json")),
+    state: await readMaybeFile(join(root, "state.json")),
+    releases: await listTreeModes(join(root, "releases")),
+    companionStatus: await inspectCompanionLease(configPath),
+    rootMode: (await lstat(root)).mode & 0o7777,
   };
 }
 
@@ -1208,7 +1253,7 @@ test("update from stale is a no-op when target staging fails", async (context) =
   context.after(() => rm(root, { recursive: true, force: true }));
   const configPath = join(root, "config", "bridge.json");
   const retained = release("0.2.0-beta.6", 2);
-  const { lifecycle, controls, actions } = await stalePreBinding(root, configPath, retained);
+  const { hooks, actions } = await stalePreBinding(root, configPath, retained);
   const releasesRoot = join(root, "releases");
   const versionDir = join(releasesRoot, retained.version);
   const releaseDir = join(
@@ -1219,29 +1264,76 @@ test("update from stale is a no-op when target staging fails", async (context) =
   await chmod(releasesRoot, 0o700);
   await chmod(versionDir, 0o700);
   await chmod(releaseDir, 0o700);
-  const staleStatus = {
-    state: "stale",
-    managed: true,
-    companionVersion: retained.version,
-    protocolVersions: [...retained.protocol_versions],
-    releaseIntegrity: retained.integrity,
-  };
-  controls.setStatus(staleStatus);
-  controls.setCurrent(release("0.2.0-beta.7", 3));
-  controls.setFailCurrentRelease("install_failed");
-  const before = await snapshotStaleSurface(
+  await writeStaleManagedLease(configPath, retained);
+  await chmod(root, 0o755);
+  const started = [];
+  const lifecycle = new BridgeLifecycle({
     root,
     configPath,
-    [root, releasesRoot, versionDir, releaseDir],
-    staleStatus,
-  );
+    hooks: {
+      ...hooks,
+      inspect: () => inspectCompanionLease(configPath),
+      currentRelease: async () => {
+        throw new BridgeLifecycleError("install_failed");
+      },
+      recoverStale: async (candidate) => {
+        actions.push("recover-stale");
+        await clearStaleCompanionLease(configPath, {
+          companionVersion: candidate.version,
+          releaseIntegrity: candidate.integrity,
+        });
+      },
+      start: async (candidate) => {
+        started.push(candidate.version);
+        actions.push(`start:${candidate.version}`);
+      },
+    },
+  });
+  const before = await snapshotOnDiskLifecycle(root, configPath);
+  assert.equal(before.rootMode, 0o755);
+  assert.equal(before.leaseBytes !== null, true);
+  assert.equal(before.configBinding, null);
+  assert.equal(before.rootBinding, null);
+  assert.equal(before.companionStatus.state, "stale");
 
   await assert.rejects(lifecycle.run("update"), { message: "install_failed" });
   assert.deepEqual(actions, []);
+  assert.deepEqual(started, []);
+  const after = await snapshotOnDiskLifecycle(root, configPath);
+  assert.equal(after.rootMode, 0o700);
   assert.deepEqual(
-    await snapshotStaleSurface(root, configPath, [root, releasesRoot, versionDir, releaseDir], staleStatus),
+    { ...after, rootMode: before.rootMode },
     before,
   );
+});
+
+test("deferred update from stale still applies removal-safety before the switch", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-deferred-protect-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const retained = release("0.2.0-beta.6", 2);
+  const target = release("0.2.0-beta.7", 3);
+  const { hooks, actions } = await stalePreBinding(root, configPath, retained);
+  const nested = join(root, "releases", "sand-data");
+  await mkdir(nested, { recursive: true, mode: 0o700 });
+  const previous = process.env.SAND_DATA_ROOT;
+  process.env.SAND_DATA_ROOT = nested;
+  context.after(() => {
+    if (previous === undefined) delete process.env.SAND_DATA_ROOT;
+    else process.env.SAND_DATA_ROOT = previous;
+    applyHermeticEnv();
+  });
+  const lifecycle = new BridgeLifecycle({
+    root,
+    configPath,
+    hooks: {
+      ...hooks,
+      currentRelease: async () => target,
+    },
+  });
+  await assert.rejects(lifecycle.run("update"), { message: "lifecycle_state_invalid" });
+  assert.deepEqual(actions, []);
+  await assertBindingsAbsent(root, configPath);
 });
 
 test("update never clears a foreign active lease", async (context) => {
@@ -1811,7 +1903,7 @@ async function npmRegistryReachable() {
 
 function registryProbeEnabled() {
   return (
-    (process.env.CI !== undefined && process.env.CI !== "") ||
+    /^(true|1)$/i.test(process.env.CI ?? "") ||
     process.env.CODEX_GROK_TEST_REGISTRY === "1"
   );
 }
@@ -2692,19 +2784,78 @@ test("production managed child environment still forwards the gateway allowlist"
 });
 
 test("hermetic guard rejects the real Grok Bot data root", () => {
-  const previous = process.exitCode;
-  try {
-    assert.throws(
-      () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
-      (caught) => caught instanceof TestRealDataRootError,
-    );
-    assert.throws(
-      () => grokBotDataRoot({ SAND_USER_DATA_DIR: "/home/box" }),
-      (caught) => caught instanceof TestRealDataRootError,
-    );
-  } finally {
-    process.exitCode = previous;
-  }
+  assert.throws(
+    () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
+    (caught) => caught instanceof TestRealDataRootError,
+  );
+  assert.throws(
+    () => grokBotDataRoot({ SAND_USER_DATA_DIR: "/home/box" }),
+    (caught) => caught instanceof TestRealDataRootError,
+  );
+});
+
+test("install and update preflight propagate GATEWAY_ENV_MISMATCH", async (context) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-gateway-mismatch-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const root = join(sandbox, "lifecycle");
+  const dataRoot = join(sandbox, "sand-data");
+  const configPath = join(sandbox, "config", "bridge.json");
+  await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(dataRoot, "gateway.json"),
+    `${JSON.stringify({
+      port: 1340,
+      pid: 2468,
+      startedAt: Date.now(),
+      host: "127.0.0.1",
+      token: "test-gateway-token",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    configPath,
+  );
+  const candidate = await createFixtureRelease(root, "0.2.0-beta.8", 8);
+  const previousRoot = process.env.SAND_DATA_ROOT;
+  const previousPort = process.env.SAND_HOST_PORT;
+  process.env.SAND_DATA_ROOT = dataRoot;
+  process.env.SAND_HOST_PORT = "9999";
+  context.after(() => {
+    if (previousRoot === undefined) delete process.env.SAND_DATA_ROOT;
+    else process.env.SAND_DATA_ROOT = previousRoot;
+    if (previousPort === undefined) delete process.env.SAND_HOST_PORT;
+    else process.env.SAND_HOST_PORT = previousPort;
+    applyHermeticEnv();
+  });
+  const setup = harness(root, configPath);
+  let preflightImpl = (release) => preflightLifecycleRelease(root, configPath, release);
+  setup.controls.setCurrent(candidate);
+  const lifecycle = new BridgeLifecycle({
+    root,
+    configPath,
+    hooks: {
+      ...setup.hooks,
+      preflight: (release) => preflightImpl(release),
+    },
+  });
+  await assert.rejects(lifecycle.run("install"), (caught) => {
+    assert(caught instanceof BridgeLifecycleError);
+    assert.equal(caught.code, "candidate_invalid");
+    assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+    return true;
+  });
+  setup.controls.setCurrent(release("0.2.0-beta.5", 1));
+  preflightImpl = async () => undefined;
+  await lifecycle.run("install");
+  setup.controls.setCurrent(candidate);
+  preflightImpl = (release) => preflightLifecycleRelease(root, configPath, release);
+  await assert.rejects(lifecycle.run("update"), (caught) => {
+    assert(caught instanceof BridgeLifecycleError);
+    assert.equal(caught.code, "candidate_invalid");
+    assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+    return true;
+  });
 });
 
 test("box-like inherited env still uses the fixture data root", (context) => {
@@ -2879,7 +3030,7 @@ test("managed child with hermetic flag and real root fails before any read or co
   assert.equal(result.name, "TestRealDataRootError");
   assert.equal(result.reason, "TEST_REAL_DATA_ROOT");
   assert.equal(result.readOrConnect, false);
-  assert.match(Buffer.concat(stderr).toString("utf8"), /test data root resolved to the real Grok Bot data root/);
+  assert.equal(Buffer.concat(stderr).toString("utf8"), "");
 });
 
 test("hermetic fixture cleanup never follows a replaced base symlink", async (context) => {
