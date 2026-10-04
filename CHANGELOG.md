@@ -25,6 +25,7 @@ Prerelease. Stable `0.2.0` is not published; this beta carries every change sinc
 - `install` without a valid pairing now fails with `PAIRING_REQUIRED` before staging a release, writing bindings, or taking a lease, and leaves nothing on disk.
 - The companion detects a dead or half-open relay socket with a WebSocket ping (30 s) and pong/inbound-frame deadline (10 s), then follows the normal reconnect path. A send already in flight is not retried.
 - Reconnect backoff resets to the first delay only after the connection has proven healthy (first pong, first valid inbound frame, or 10 s stable uptime). A relay that accepts then immediately drops still backs off up to 15 s.
+- Aborting a companion while the relay handshake is still `CONNECTING` ignores only the ws 8.x `WebSocket was closed before the connection was established` error, so SIGTERM during handshake does not crash with an uncaught exception.
 - `GATEWAY_ENV_MISMATCH` is carried on the paired `CONFIG_INVALID` error. The Codex-visible message names `SAND_HOST_PORT` and `SAND_GATEWAY_BIND_HOST` so a bind-host mismatch is not reported as a port-only error.
 - Mixed-version beta.9 MCP: the new `reason` key on the error wire is rejected by beta.9's strict error schema, so a definitely-failed send is shown as `outcome_unknown` (the safe direction).
 

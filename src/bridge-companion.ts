@@ -83,6 +83,32 @@ export const RELAY_PING_INTERVAL_MS = 30_000;
 export const RELAY_PONG_DEADLINE_MS = 10_000;
 export const RELAY_HEALTHY_UPTIME_MS = 10_000;
 export const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+const CONNECTING_CLOSED_ERROR = "WebSocket was closed before the connection was established";
+
+type LivenessHandle = ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
+
+const livenessTimers = new Set<LivenessHandle>();
+
+function trackLivenessTimer<T extends LivenessHandle>(handle: T): T {
+  livenessTimers.add(handle);
+  return handle;
+}
+
+function clearTrackedTimeout(handle: ReturnType<typeof setTimeout> | undefined): void {
+  if (handle === undefined) return;
+  clearTimeout(handle);
+  livenessTimers.delete(handle);
+}
+
+function clearTrackedInterval(handle: ReturnType<typeof setInterval> | undefined): void {
+  if (handle === undefined) return;
+  clearInterval(handle);
+  livenessTimers.delete(handle);
+}
+
+export function livenessTimerCountForTests(): number {
+  return livenessTimers.size;
+}
 
 export type RunBridgeOptions = {
   pingIntervalMs?: number;
@@ -628,9 +654,9 @@ async function connectOnce(
     let healthyTimer: ReturnType<typeof setTimeout> | undefined;
 
     const clearLiveness = (): void => {
-      if (pingTimer !== undefined) clearInterval(pingTimer);
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-      if (healthyTimer !== undefined) clearTimeout(healthyTimer);
+      clearTrackedInterval(pingTimer);
+      clearTrackedTimeout(deadlineTimer);
+      clearTrackedTimeout(healthyTimer);
       pingTimer = undefined;
       deadlineTimer = undefined;
       healthyTimer = undefined;
@@ -639,30 +665,30 @@ async function connectOnce(
       provenHealthy = true;
     };
     const noteInbound = (): void => {
-      if (deadlineTimer !== undefined) {
-        clearTimeout(deadlineTimer);
-        deadlineTimer = undefined;
-      }
+      clearTrackedTimeout(deadlineTimer);
+      deadlineTimer = undefined;
     };
     const armDeadline = (): void => {
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-      deadlineTimer = setTimeout(() => finish(), liveness.pongDeadlineMs);
+      clearTrackedTimeout(deadlineTimer);
+      deadlineTimer = trackLivenessTimer(setTimeout(() => finish(), liveness.pongDeadlineMs));
     };
     const startLiveness = (): void => {
-      healthyTimer = setTimeout(markHealthy, liveness.healthyUptimeMs);
-      pingTimer = setInterval(() => {
-        if (socket.readyState !== WebSocket.OPEN) {
-          finish();
-          return;
-        }
-        try {
-          socket.ping();
-        } catch {
-          finish();
-          return;
-        }
-        armDeadline();
-      }, liveness.pingIntervalMs);
+      healthyTimer = trackLivenessTimer(setTimeout(markHealthy, liveness.healthyUptimeMs));
+      pingTimer = trackLivenessTimer(
+        setInterval(() => {
+          if (socket.readyState !== WebSocket.OPEN) {
+            finish();
+            return;
+          }
+          try {
+            socket.ping();
+          } catch {
+            finish();
+            return;
+          }
+          armDeadline();
+        }, liveness.pingIntervalMs),
+      );
     };
 
     const finish = (): void => {
@@ -670,13 +696,16 @@ async function connectOnce(
       settled = true;
       clearLiveness();
       signal?.removeEventListener("abort", onAbort);
+      const connecting = socket.readyState === WebSocket.CONNECTING;
       socket.removeAllListeners();
-      socket.on("error", () => undefined);
-      try {
-        socket.terminate();
-      } catch {
-        // CONNECTING terminate emits or throws on some Node/ws pairs.
+      if (connecting) {
+        // ws 8.x terminate() during CONNECTING emits this error on nextTick; it does not throw.
+        socket.on("error", (error: Error) => {
+          if (error.message === CONNECTING_CLOSED_ERROR) return;
+          throw error;
+        });
       }
+      socket.terminate();
       resolve();
     };
     const onAbort = (): void => finish();

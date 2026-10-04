@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -30,10 +30,14 @@ async function fingerprintTree(root) {
       }
       if (!entry.isFile()) continue;
       const bytes = await readFile(path);
+      const details = await lstat(path);
       files.push({
         path: nextRel,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         size: bytes.length,
+        ino: details.ino,
+        mtimeMs: details.mtimeMs,
+        ctimeMs: details.ctimeMs,
       });
     }
   }
@@ -239,7 +243,6 @@ test("npx offline tarball install gets past the candidate pack check", async (co
         TMPDIR: process.env.TMPDIR,
         INIT_CWD: packDest,
         npm_config_update_notifier: "false",
-        npm_config_ignore_scripts: "true",
       },
     }).stdout,
   );
