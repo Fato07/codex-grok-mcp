@@ -14,9 +14,14 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
+import {
+  GROK_BOT_DATA_ROOTS,
+  TestRealDataRootError,
+  grokBotDataRoot,
+  skipRealGrokBotRootSyscall,
+} from "./grok-bot-client.js";
 
 export type AttachmentPathGuard = {
   homes?: readonly string[];
@@ -24,7 +29,9 @@ export type AttachmentPathGuard = {
 };
 
 function foldPath(path: string): string {
-  return process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
+  const folded =
+    process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
+  return process.platform === "darwin" ? folded.normalize("NFC") : folded;
 }
 
 function pathsEqual(left: string, right: string): boolean {
@@ -512,6 +519,7 @@ function deniedAttachmentLocations(
   const remember = (target: string[], value: string): void => {
     const resolved = resolve(value);
     target.push(resolved);
+    if (skipRealGrokBotRootSyscall(resolved)) return;
     try {
       const real = nativeRealpath(resolved);
       if (real !== resolved) target.push(real);
@@ -524,6 +532,10 @@ function deniedAttachmentLocations(
   };
   const addFile = (value: string): void => {
     remember(files, value);
+  };
+  const addSandRootSecrets = (root: string): void => {
+    addFile(join(root, "gateway.json"));
+    addPrefix(join(root, "config"));
   };
   for (const candidate of accountHomes(environment, home, extraHomes)) {
     addPrefix(join(candidate, ".grok"));
@@ -549,18 +561,81 @@ function deniedAttachmentLocations(
   if (xdgState !== undefined) addPrefix(connectorTree(xdgState));
   const stagingRoot = absoluteEnvPath(environment, "CODEX_GROK_ATTACHMENT_STAGING_ROOT");
   if (stagingRoot !== undefined) addPrefix(stagingRoot);
+  const grokHome = absoluteEnvPath(environment, "GROK_HOME");
+  if (grokHome !== undefined) addPrefix(grokHome);
+  const codexHome = absoluteEnvPath(environment, "CODEX_HOME");
+  if (codexHome !== undefined) addPrefix(codexHome);
   const configuredAuth = environment.GROK_MCP_AUTH_PATH?.trim();
   if (configuredAuth !== undefined && configuredAuth !== "") {
     addFile(isAbsolute(configuredAuth) ? configuredAuth : resolve(configuredAuth));
   }
+  for (const root of GROK_BOT_DATA_ROOTS) addSandRootSecrets(root);
   try {
-    const sandRoot = grokBotDataRoot(environment);
-    addFile(join(sandRoot, "gateway.json"));
-    addPrefix(join(sandRoot, "config"));
+    addSandRootSecrets(grokBotDataRoot(environment));
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
   }
   return { prefixes, files };
+}
+
+function pinPathIdentity(path: string, identities: Set<string>, directoriesOnly = false): void {
+  if (skipRealGrokBotRootSyscall(path)) return;
+  try {
+    const details = lstatSync(path);
+    if (directoriesOnly && details.isDirectory() === false && details.isSymbolicLink() === false) {
+      return;
+    }
+    if (directoriesOnly === false || details.isDirectory()) {
+      identities.add(`${details.dev}:${details.ino}`);
+    }
+    if (details.isSymbolicLink() === false) return;
+    const real = nativeRealpath(path);
+    const realDetails = lstatSync(real);
+    if (directoriesOnly && realDetails.isDirectory() === false) return;
+    identities.add(`${realDetails.dev}:${realDetails.ino}`);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+  }
+}
+
+function deniedDirectoryIdentities(prefixes: readonly string[]): Set<string> {
+  const identities = new Set<string>();
+  for (const prefix of prefixes) pinPathIdentity(prefix, identities, true);
+  return identities;
+}
+
+function ancestorDirectoryIdentities(
+  resolvedPath: string,
+  fd?: number,
+  resolveOpenedFd?: (fd: number) => string,
+): Set<string> {
+  const identities = new Set<string>();
+  const start =
+    fd === undefined ? resolvedPath : (resolveOpenedFdPath(fd, resolveOpenedFd) ?? resolvedPath);
+  let cursor = dirname(resolve(start));
+  const seen = new Set<string>();
+  const directoryFlag = typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
+  while (seen.has(cursor) === false) {
+    seen.add(cursor);
+    if (skipRealGrokBotRootSyscall(cursor) === false) {
+      try {
+        const dirFd = openNoFollow(cursor, fsConstants.O_RDONLY | directoryFlag);
+        try {
+          const details = fstatSync(dirFd);
+          identities.add(`${details.dev}:${details.ino}`);
+        } finally {
+          closeSync(dirFd);
+        }
+      } catch (caught) {
+        if (caught instanceof TestRealDataRootError) throw caught;
+        pinPathIdentity(cursor, identities, true);
+      }
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return identities;
 }
 
 export function assertNotSensitiveAttachmentSource(
@@ -569,6 +644,7 @@ export function assertNotSensitiveAttachmentSource(
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
   extraHomes?: readonly string[],
+  opened?: { fd: number; resolveOpenedFd?: (fd: number) => string },
 ): void {
   const { prefixes, files } = deniedAttachmentLocations(environment, home, extraHomes);
   const resolved = resolve(resolvedPath);
@@ -578,18 +654,15 @@ export function assertNotSensitiveAttachmentSource(
   const identities = new Set<string>();
   for (const file of files) {
     if (pathsEqual(resolved, file)) fail("ATTACHMENT_REJECTED");
-    try {
-      const details = lstatSync(file);
-      identities.add(`${details.dev}:${details.ino}`);
-      if (details.isSymbolicLink() === false) continue;
-      const real = nativeRealpath(file);
-      const realDetails = lstatSync(real);
-      identities.add(`${realDetails.dev}:${realDetails.ino}`);
-    } catch (caught) {
-      if (caught instanceof TestRealDataRootError) throw caught;
-    }
+    pinPathIdentity(file, identities);
   }
   if (identities.has(`${stats.dev}:${stats.ino}`)) fail("ATTACHMENT_REJECTED");
+  const deniedDirs = deniedDirectoryIdentities(prefixes);
+  if (deniedDirs.size === 0) return;
+  const ancestors = ancestorDirectoryIdentities(resolved, opened?.fd, opened?.resolveOpenedFd);
+  for (const identity of ancestors) {
+    if (deniedDirs.has(identity)) fail("ATTACHMENT_REJECTED");
+  }
 }
 
 export function validateLocalAttachmentFile(
@@ -621,7 +694,9 @@ export function validateLocalAttachmentFile(
     }
     if (next.size !== initial.size) fail("ATTACHMENT_REJECTED");
     const resolvedPath = outboundResolvedFdPath(fd, path, next, guard?.resolveOpenedFd);
-    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home, guard?.homes);
+    const opened =
+      guard?.resolveOpenedFd === undefined ? { fd } : { fd, resolveOpenedFd: guard.resolveOpenedFd };
+    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home, guard?.homes, opened);
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
     while (offset < bytes.length) {
@@ -1176,7 +1251,9 @@ const stores = new Map<string, AttachmentSessionStore>();
 export function attachmentSessionStore(
   root: string,
   now?: () => number,
+  options?: { reset?: boolean },
 ): AttachmentSessionStore {
+  if (options?.reset === true) stores.delete(root);
   const existing = stores.get(root);
   if (existing !== undefined) {
     if (now !== undefined) existing.now = now;
@@ -1185,10 +1262,6 @@ export function attachmentSessionStore(
   const created = new AttachmentSessionStore(root, now ?? Date.now);
   stores.set(root, created);
   return created;
-}
-
-export function resetAttachmentSessionStore(root: string): void {
-  stores.delete(root);
 }
 
 export function sandRootForAttachments(env: NodeJS.ProcessEnv = process.env): string {

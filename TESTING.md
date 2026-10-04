@@ -28,8 +28,9 @@ Linux-only tests skip on macOS. The Linux total must equal macOS pass + skip. Cu
 - readAttachment is only called with a path taken from a fresh transcript entry
 - symlink swap after a successful confined open does not leak on later windows
 - parent-directory swap after a confined open is ATTACHMENT_REJECTED
+- outbound denies a bind-mounted directory alias of a credential tree
 
-A case-insensitive-filesystem test skips at runtime when `Aa` and `aa` are distinct inodes. That skip is not Linux-only.
+A case-insensitive-filesystem test skips at runtime when `Aa` and `aa` are distinct inodes. That skip is not Linux-only. The bind-mounted directory-alias test is Linux-only and also skips when `mount --bind` is unavailable.
 
 ## Sandbox caveat
 

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -189,13 +190,26 @@ test("documented Grok models match the shared finite tuple", async () => {
 });
 
 test("npm pack excludes attachment test-hooks files", async () => {
+  const repo = fileURLToPath(new URL("..", import.meta.url));
+  const sourceDist = join(repo, "dist");
+  const before = new Map();
+  for (const name of await readdir(sourceDist)) {
+    before.set(name, (await stat(join(sourceDist, name))).mtimeMs);
+  }
   const dest = await mkdtemp(join(tmpdir(), "codex-grok-pack-"));
   try {
-    const { stdout } = await execFileAsync(
-      "npm",
-      ["pack", "--ignore-scripts", "--json", `--pack-destination=${dest}`],
-      { cwd: new URL("..", import.meta.url), encoding: "utf8" },
-    );
+    const pkgDir = join(dest, "src-pkg");
+    const packed = JSON.parse(await readFile(join(repo, "package.json"), "utf8"));
+    delete packed.scripts?.prepare;
+    delete packed.scripts?.prepublishOnly;
+    packed.files = ["dist"];
+    await mkdir(pkgDir, { recursive: true });
+    await cp(sourceDist, join(pkgDir, "dist"), { recursive: true });
+    await writeFile(join(pkgDir, "package.json"), `${JSON.stringify(packed, null, 2)}\n`);
+    const { stdout } = await execFileAsync("npm", ["pack", "--json", `--pack-destination=${dest}`], {
+      cwd: pkgDir,
+      encoding: "utf8",
+    });
     const packs = JSON.parse(stdout);
     const files = packs[0]?.files?.map((entry) => entry.path) ?? [];
     assert.equal(
@@ -214,11 +228,19 @@ test("npm pack excludes attachment test-hooks files", async () => {
       const text = await readFile(join(distDir, name), "utf8");
       if (text.includes("Symbol.for")) hits.push(`${name}: Symbol.for`);
       if (text.includes("test-hooks")) hits.push(`${name}: test-hooks`);
+      if (text.includes("resetAttachmentSessionStore")) {
+        hits.push(`${name}: resetAttachmentSessionStore`);
+      }
       if (text.includes("CODEX_GROK_TEST_") && allowedTestEnv(name) === false) {
         hits.push(`${name}: CODEX_GROK_TEST_`);
       }
     }
     assert.deepEqual(hits, []);
+    const after = new Map();
+    for (const name of await readdir(sourceDist)) {
+      after.set(name, (await stat(join(sourceDist, name))).mtimeMs);
+    }
+    assert.deepEqual([...after], [...before]);
   } finally {
     await rm(dest, { recursive: true, force: true });
   }

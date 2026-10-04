@@ -6,7 +6,11 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 
 export const DEFAULT_GROK_BOT_DATA_ROOT = "/home/box/sand-data";
-const LEGACY_GROK_BOT_DATA_ROOT = "/home/box/agent-data";
+export const LEGACY_GROK_BOT_DATA_ROOT = "/home/box/agent-data";
+export const GROK_BOT_DATA_ROOTS = Object.freeze([
+  DEFAULT_GROK_BOT_DATA_ROOT,
+  LEGACY_GROK_BOT_DATA_ROOT,
+]);
 const DEFAULT_SAND_ROOT = DEFAULT_GROK_BOT_DATA_ROOT;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -222,10 +226,30 @@ function existingRealpath(path: string): string | undefined {
   }
 }
 
+export function isLexicalGrokBotDataRootPath(path: string): boolean {
+  const resolved = resolve(path);
+  for (const candidate of GROK_BOT_DATA_ROOTS) {
+    const forbidden = resolve(candidate);
+    if (
+      resolved === forbidden ||
+      resolved === `${forbidden}${sep}` ||
+      resolved.startsWith(`${forbidden}${sep}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function skipRealGrokBotRootSyscall(path: string): boolean {
+  return testRealDataRootGuardActive() && isLexicalGrokBotDataRootPath(path);
+}
+
 function realGrokBotDataRoots(): string[] {
   const roots = new Set<string>();
-  for (const candidate of [DEFAULT_GROK_BOT_DATA_ROOT, LEGACY_GROK_BOT_DATA_ROOT]) {
+  for (const candidate of GROK_BOT_DATA_ROOTS) {
     roots.add(resolve(candidate));
+    if (skipRealGrokBotRootSyscall(candidate)) continue;
     const real = existingRealpath(candidate);
     if (real !== undefined) roots.add(real);
   }
