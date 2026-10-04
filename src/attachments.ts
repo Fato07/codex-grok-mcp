@@ -21,7 +21,6 @@ import {
   candidateGrokBotDataRoots,
   grokBotDataRoot,
   isLexicalGrokBotDataRootPath,
-  testRealDataRootGuardActive,
 } from "./grok-bot-client.js";
 
 export type AttachmentPathGuard = {
@@ -476,23 +475,39 @@ function assertRegularFile(path: string): Stats {
   }
 }
 
+function assertAbsoluteGuardEntries(
+  value: readonly string[] | undefined,
+  label: "homes" | "sandRoots",
+): void {
+  if (value === undefined) return;
+  if (value.length === 0) {
+    throw new TypeError(`AttachmentPathGuard.${label} must not be empty`);
+  }
+  for (const entry of value) {
+    const trimmed = typeof entry === "string" ? entry.trim() : "";
+    if (trimmed === "" || isAbsolute(trimmed) === false) {
+      throw new TypeError(`AttachmentPathGuard.${label} entries must be absolute`);
+    }
+  }
+}
+
 function requireAddedGuardList(
   value: readonly string[] | undefined,
   label: "homes" | "sandRoots",
 ): readonly string[] {
+  assertAbsoluteGuardEntries(value, label);
   if (value === undefined) return [];
-  if (value.length === 0) {
-    throw new TypeError(`AttachmentPathGuard.${label} must not be empty`);
-  }
-  return value;
+  return value.map((entry) => entry.trim());
 }
 
 function guardHasFixtureRoots(guard?: AttachmentPathGuard): boolean {
+  assertAbsoluteGuardEntries(guard?.homes, "homes");
+  assertAbsoluteGuardEntries(guard?.sandRoots, "sandRoots");
   return (guard?.homes?.length ?? 0) > 0 || (guard?.sandRoots?.length ?? 0) > 0;
 }
 
 function lexicalDefaultTreesActive(guard?: AttachmentPathGuard): boolean {
-  return testRealDataRootGuardActive() || guardHasFixtureRoots(guard);
+  return guardHasFixtureRoots(guard);
 }
 
 function passwdHomePath(): string | undefined {

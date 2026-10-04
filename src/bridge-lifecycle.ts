@@ -1748,9 +1748,6 @@ export function managedChildEnvironment(extra: NodeJS.ProcessEnv): NodeJS.Proces
   const hermeticFlag = process.env.CODEX_GROK_TEST_HERMETIC;
   if (hermeticFlag !== undefined) {
     environment.CODEX_GROK_TEST_HERMETIC = hermeticFlag;
-    if (process.env.NODE_OPTIONS !== undefined) {
-      environment.NODE_OPTIONS = process.env.NODE_OPTIONS;
-    }
   }
   return { ...environment, ...extra };
 }

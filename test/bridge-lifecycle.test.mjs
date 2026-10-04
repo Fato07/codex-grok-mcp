@@ -2982,9 +2982,11 @@ test("managed child environment forwards the hermetic flag only when the parent 
   process.env.CODEX_GROK_TEST_HERMETIC = "1";
   const withFlag = managedChildEnvironment(extra);
   assert.equal(withFlag.CODEX_GROK_TEST_HERMETIC, "1");
+  assert.equal(Object.hasOwn(withFlag, "NODE_OPTIONS"), false);
   delete process.env.CODEX_GROK_TEST_HERMETIC;
   const withoutFlag = managedChildEnvironment(extra);
   assert.equal(Object.hasOwn(withoutFlag, "CODEX_GROK_TEST_HERMETIC"), false);
+  assert.equal(Object.hasOwn(withoutFlag, "NODE_OPTIONS"), false);
 });
 
 test("managed child with hermetic flag and real root fails before any read or connect", async () => {

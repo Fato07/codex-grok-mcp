@@ -1722,6 +1722,22 @@ test("empty AttachmentPathGuard homes or sandRoots is rejected", async () => {
       }),
     (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
+  assert.throws(
+    () =>
+      validateLocalAttachmentFile(safe, "note.txt", env, hermetic.accountHome, {
+        homes: ["relative-home"],
+        sandRoots: [hermetic.defaultSandRoot],
+      }),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+  );
+  assert.throws(
+    () =>
+      validateLocalAttachmentFile(safe, "note.txt", env, hermetic.accountHome, {
+        homes: [hermetic.accountHome],
+        sandRoots: ["relative-sand"],
+      }),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+  );
 });
 
 test("production without a guard full-pins the default Sand and home trees", async () => {
@@ -1732,18 +1748,56 @@ test("production without a guard full-pins the default Sand and home trees", asy
     script,
     `
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, symlinkSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_GROK_BOT_DATA_ROOT,
   LEGACY_GROK_BOT_DATA_ROOT,
 } from ${JSON.stringify(join(repo, "dist/grok-bot-client.js"))};
-import { validateLocalAttachmentFile } from ${JSON.stringify(join(repo, "dist/attachments.js"))};
+import { AttachmentError, validateLocalAttachmentFile } from ${JSON.stringify(join(repo, "dist/attachments.js"))};
 
-const home = process.env.HOME;
-const file = join(process.env.TMPDIR, "sh2-ok.txt");
-writeFileSync(file, "hello attachment\\n");
-validateLocalAttachmentFile(file, "ok.txt", { HOME: home, SAND_DATA_ROOT: process.env.SAND_DATA_ROOT }, home);
+const tmp = process.env.TMPDIR;
+const home = join(tmp, process.env.CODEX_GROK_TEST_HERMETIC === "1" ? "pin-home-on" : "pin-home-off");
+mkdirSync(home, { recursive: true, mode: 0o700 });
+process.env.HOME = home;
+const env = { HOME: home, SAND_DATA_ROOT: process.env.SAND_DATA_ROOT };
+const grokDir = join(home, ".grok");
+mkdirSync(grokDir, { recursive: true, mode: 0o700 });
+const auth = join(grokDir, "auth.json");
+writeFileSync(auth, '{"token":"x"}\\n', { mode: 0o600 });
+const authStat = lstatSync(auth);
+const grokStat = lstatSync(grokDir);
+const sandIds = globalThis.CODEX_GROK_FULL_PIN_SAND_IDS;
+assert.equal(typeof sandIds?.gateway?.dev, "number");
+assert.equal(typeof sandIds?.config?.dev, "number");
+
+const decoyAuth = join(tmp, "bound-auth.txt");
+const decoyGateway = join(tmp, "bound-gateway.txt");
+const decoyGrokDir = join(tmp, "bound-grok-dir");
+const decoyGrokFile = join(decoyGrokDir, "note.txt");
+const decoySandDir = join(tmp, "bound-sand-dir");
+const decoySandFile = join(decoySandDir, "note.txt");
+const ok = join(tmp, "sh2-ok.txt");
+writeFileSync(decoyAuth, "hello attachment\\n");
+writeFileSync(decoyGateway, "hello attachment\\n");
+mkdirSync(decoyGrokDir, { recursive: true, mode: 0o700 });
+mkdirSync(decoySandDir, { recursive: true, mode: 0o700 });
+writeFileSync(decoyGrokFile, "hello attachment\\n");
+writeFileSync(decoySandFile, "hello attachment\\n");
+writeFileSync(ok, "hello attachment\\n");
+const decoyAuthStat = lstatSync(decoyAuth);
+const decoyGatewayStat = lstatSync(decoyGateway);
+const decoyGrokDirStat = lstatSync(decoyGrokDir);
+const decoySandDirStat = lstatSync(decoySandDir);
+
+globalThis.CODEX_GROK_FULL_PIN_OVERLAYS = [
+  { from: decoyAuthStat, to: { dev: authStat.dev, ino: authStat.ino, file: true } },
+  { from: decoyGatewayStat, to: { dev: sandIds.gateway.dev, ino: sandIds.gateway.ino, file: true } },
+  { from: decoyGrokDirStat, to: { dev: grokStat.dev, ino: grokStat.ino, file: false } },
+  { from: decoySandDirStat, to: { dev: sandIds.config.dev, ino: sandIds.config.ino, file: false } },
+];
+
+validateLocalAttachmentFile(ok, "ok.txt", env, home);
 const pinned = globalThis.CODEX_GROK_FULL_PIN_CALLS ?? [];
 const needed = [
   join(DEFAULT_GROK_BOT_DATA_ROOT, "gateway.json"),
@@ -1759,17 +1813,44 @@ for (const path of needed) {
     \`missing full-pin of \${path} in \${JSON.stringify(pinned)}\`,
   );
 }
+
+const denied = [
+  [decoyAuth, "auth.txt"],
+  [decoyGateway, "gateway.txt"],
+  [decoyGrokFile, "note.txt"],
+  [decoySandFile, "note.txt"],
+];
+for (const [path, name] of denied) {
+  assert.throws(
+    () => validateLocalAttachmentFile(path, name, env, home),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+    \`expected identity deny for \${path}\`,
+  );
+}
+
+const codexTarget = join(tmp, "codex-target");
+mkdirSync(codexTarget, { recursive: true, mode: 0o700 });
+const linkedAuth = join(codexTarget, "auth.json");
+writeFileSync(linkedAuth, '{"token":"codex"}\\n', { mode: 0o600 });
+symlinkSync(codexTarget, join(home, ".codex"));
+assert.throws(
+  () => validateLocalAttachmentFile(linkedAuth, "auth.json", env, home),
+  (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+);
 `,
   );
-  const env = { ...process.env };
-  delete env.CODEX_GROK_TEST_HERMETIC;
-  delete env.NODE_OPTIONS;
-  const traced = spawnSync(process.execPath, ["--require", preload, script], {
-    encoding: "utf8",
-    env,
-    timeout: 15_000,
-  });
-  assert.equal(traced.status, 0, `${traced.stdout}\n${traced.stderr}`);
+  for (const hermetic of ["0", "1"]) {
+    const env = { ...process.env };
+    delete env.NODE_OPTIONS;
+    if (hermetic === "1") env.CODEX_GROK_TEST_HERMETIC = "1";
+    else delete env.CODEX_GROK_TEST_HERMETIC;
+    const traced = spawnSync(process.execPath, ["--require", preload, script], {
+      encoding: "utf8",
+      env,
+      timeout: 15_000,
+    });
+    assert.equal(traced.status, 0, `hermetic=${hermetic}\n${traced.stdout}\n${traced.stderr}`);
+  }
 });
 
 test("outbound without sandRoots still denies the fixed default and legacy roots", () => {
