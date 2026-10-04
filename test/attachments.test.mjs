@@ -1683,7 +1683,7 @@ test("empty AttachmentPathGuard homes or sandRoots is rejected", async () => {
         homes: [],
         sandRoots: [hermetic.defaultSandRoot],
       }),
-    (caught) => caught instanceof TypeError && /homes/.test(caught.message),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
   assert.throws(
     () =>
@@ -1691,8 +1691,56 @@ test("empty AttachmentPathGuard homes or sandRoots is rejected", async () => {
         homes: [hermetic.accountHome],
         sandRoots: [],
       }),
-    (caught) => caught instanceof TypeError && /sandRoots/.test(caught.message),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
   );
+});
+
+test("production without a guard full-pins the default Sand and home trees", async () => {
+  const repo = fileURLToPath(new URL("..", import.meta.url));
+  const preload = fileURLToPath(new URL("./production-full-pin-preload.cjs", import.meta.url));
+  const script = join(hermetic.base, "sh2-production-full-pin.mjs");
+  await writeFile(
+    script,
+    `
+import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  DEFAULT_GROK_BOT_DATA_ROOT,
+  LEGACY_GROK_BOT_DATA_ROOT,
+} from ${JSON.stringify(join(repo, "dist/grok-bot-client.js"))};
+import { validateLocalAttachmentFile } from ${JSON.stringify(join(repo, "dist/attachments.js"))};
+
+const home = process.env.HOME;
+const file = join(process.env.TMPDIR, "sh2-ok.txt");
+writeFileSync(file, "hello attachment\\n");
+validateLocalAttachmentFile(file, "ok.txt", { HOME: home, SAND_DATA_ROOT: process.env.SAND_DATA_ROOT }, home);
+const pinned = globalThis.CODEX_GROK_FULL_PIN_CALLS ?? [];
+const needed = [
+  join(DEFAULT_GROK_BOT_DATA_ROOT, "gateway.json"),
+  join(DEFAULT_GROK_BOT_DATA_ROOT, "config"),
+  join(LEGACY_GROK_BOT_DATA_ROOT, "gateway.json"),
+  join(LEGACY_GROK_BOT_DATA_ROOT, "config"),
+  join(home, ".grok"),
+];
+for (const path of needed) {
+  assert.equal(
+    pinned.some((entry) => entry.includes(path)),
+    true,
+    \`missing full-pin of \${path} in \${JSON.stringify(pinned)}\`,
+  );
+}
+`,
+  );
+  const env = { ...process.env };
+  delete env.CODEX_GROK_TEST_HERMETIC;
+  delete env.NODE_OPTIONS;
+  const traced = spawnSync(process.execPath, ["--require", preload, script], {
+    encoding: "utf8",
+    env,
+    timeout: 15_000,
+  });
+  assert.equal(traced.status, 0, `${traced.stdout}\n${traced.stderr}`);
 });
 
 test("outbound without sandRoots still denies the fixed default and legacy roots", () => {

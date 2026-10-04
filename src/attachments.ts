@@ -21,6 +21,7 @@ import {
   candidateGrokBotDataRoots,
   grokBotDataRoot,
   isLexicalGrokBotDataRootPath,
+  testRealDataRootGuardActive,
 } from "./grok-bot-client.js";
 
 export type AttachmentPathGuard = {
@@ -486,16 +487,50 @@ function requireAddedGuardList(
   return value;
 }
 
+function guardHasFixtureRoots(guard?: AttachmentPathGuard): boolean {
+  return (guard?.homes?.length ?? 0) > 0 || (guard?.sandRoots?.length ?? 0) > 0;
+}
+
+function lexicalDefaultTreesActive(guard?: AttachmentPathGuard): boolean {
+  return testRealDataRootGuardActive() || guardHasFixtureRoots(guard);
+}
+
+function passwdHomePath(): string | undefined {
+  try {
+    const value = userInfo().homedir;
+    if (typeof value === "string" && value.trim() !== "") return resolve(value);
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function isLexicalDefaultHomeRoot(path: string): boolean {
+  const resolved = resolve(path);
+  const defaults = new Set<string>();
+  const passwd = passwdHomePath();
+  if (passwd !== undefined) defaults.add(passwd);
+  const osHome = resolve(homedir());
+  if (passwd !== undefined && pathsEqual(osHome, passwd)) defaults.add(osHome);
+  else if (passwd === undefined) defaults.add(osHome);
+  for (const home of defaults) {
+    if (pathsEqual(resolved, home) || pathIsUnder(resolved, home)) return true;
+  }
+  return false;
+}
+
 function accountHomes(
   environment: NodeJS.ProcessEnv,
   home: string,
-  extraHomes?: readonly string[],
+  extraHomes: readonly string[] | undefined,
+  lexicalDefaults: boolean,
 ): string[] {
   const homes = new Set<string>();
   const add = (value: string | undefined): void => {
     if (typeof value !== "string" || value.trim() === "") return;
     const resolved = resolve(value);
     homes.add(resolved);
+    if (lexicalDefaults && isLexicalDefaultHomeRoot(resolved)) return;
     try {
       homes.add(nativeRealpath(resolved));
     } catch (caught) {
@@ -535,6 +570,7 @@ function deniedAttachmentLocations(
   const lexicalOnly = new Set<string>();
   const extraHomes = requireAddedGuardList(guard?.homes, "homes");
   const extraSandRoots = requireAddedGuardList(guard?.sandRoots, "sandRoots");
+  const lexicalDefaults = lexicalDefaultTreesActive(guard);
   const remember = (target: string[], value: string, lexical = false): void => {
     const resolved = resolve(value);
     target.push(resolved);
@@ -559,17 +595,18 @@ function deniedAttachmentLocations(
     addFile(join(root, "gateway.json"), lexical);
     addPrefix(join(root, "config"), lexical);
   };
-  for (const candidate of accountHomes(environment, home, extraHomes)) {
-    addPrefix(join(candidate, ".grok"));
-    addPrefix(join(candidate, ".codex"));
-    addPrefix(join(candidate, ".ssh"));
-    addFile(join(candidate, ".grok", "auth.json"));
-    addFile(join(candidate, ".codex", "auth.json"));
-    addPrefix(connectorTree(join(candidate, ".config")));
-    addPrefix(connectorTree(join(candidate, ".local", "share")));
-    addPrefix(connectorTree(join(candidate, ".local", "state")));
-    addFile(join(candidate, ".config", "codex-grok-mcp", "bridge.json"));
-    addFile(join(candidate, ".config", "codex-grok-mcp", "bridge.json.lifecycle.json"));
+  for (const candidate of accountHomes(environment, home, extraHomes, lexicalDefaults)) {
+    const lexical = lexicalDefaults && isLexicalDefaultHomeRoot(candidate);
+    addPrefix(join(candidate, ".grok"), lexical);
+    addPrefix(join(candidate, ".codex"), lexical);
+    addPrefix(join(candidate, ".ssh"), lexical);
+    addFile(join(candidate, ".grok", "auth.json"), lexical);
+    addFile(join(candidate, ".codex", "auth.json"), lexical);
+    addPrefix(connectorTree(join(candidate, ".config")), lexical);
+    addPrefix(connectorTree(join(candidate, ".local", "share")), lexical);
+    addPrefix(connectorTree(join(candidate, ".local", "state")), lexical);
+    addFile(join(candidate, ".config", "codex-grok-mcp", "bridge.json"), lexical);
+    addFile(join(candidate, ".config", "codex-grok-mcp", "bridge.json.lifecycle.json"), lexical);
   }
   const xdgConfig = absoluteEnvPath(environment, "XDG_CONFIG_HOME");
   if (xdgConfig !== undefined) {
@@ -598,7 +635,7 @@ function deniedAttachmentLocations(
   }
   for (const root of extraSandRoots) addSandRootSecrets(root);
   for (const root of candidateGrokBotDataRoots(environment)) {
-    addSandRootSecrets(root, guard !== undefined && isLexicalGrokBotDataRootPath(root));
+    addSandRootSecrets(root, lexicalDefaults && isLexicalGrokBotDataRootPath(root));
   }
   return { prefixes, files, lexicalOnly };
 }
@@ -738,11 +775,7 @@ export function validateLocalAttachmentFile(
       resolved_path: resolvedPath,
     };
   } catch (caught) {
-    if (
-      caught instanceof TestRealDataRootError ||
-      caught instanceof AttachmentError ||
-      caught instanceof TypeError
-    ) {
+    if (caught instanceof TestRealDataRootError || caught instanceof AttachmentError) {
       throw caught;
     }
     throw new AttachmentError("ATTACHMENT_REJECTED");

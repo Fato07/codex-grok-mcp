@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const STATE = Symbol.for("codex-grok-hermetic-setup");
 
@@ -62,3 +63,16 @@ export function applyHermeticEnv(env = process.env) {
 }
 
 export const hermetic = applyHermeticEnv();
+
+export function spyChildEnv(env = {}) {
+  const next = { ...env };
+  const spy = fileURLToPath(new URL("./real-root-fs-spy.cjs", import.meta.url));
+  const flag = `--require ${spy}`;
+  const current = next.NODE_OPTIONS ?? process.env.NODE_OPTIONS ?? "";
+  if (current.includes("real-root-fs-spy") === false) {
+    next.NODE_OPTIONS = current.trim() === "" ? flag : `${current} ${flag}`;
+  } else if (next.NODE_OPTIONS === undefined) {
+    next.NODE_OPTIONS = current;
+  }
+  return next;
+}

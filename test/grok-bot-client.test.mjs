@@ -657,6 +657,10 @@ test("candidate Sand roots include every env derivation plus the fixed defaults"
     new Set([...GROK_BOT_DATA_ROOTS, join(user, "sand-data"), join(user, "agent-data")]),
   );
   assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_USER_DATA_DIR: `  ${user}  ` })),
+    new Set([...GROK_BOT_DATA_ROOTS, join(user, "sand-data"), join(user, "agent-data")]),
+  );
+  assert.deepEqual(
     new Set(
       candidateGrokBotDataRoots({
         SAND_DATA_ROOT: dataRoot,

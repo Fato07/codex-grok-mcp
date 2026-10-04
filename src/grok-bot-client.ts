@@ -233,7 +233,7 @@ export function isLexicalGrokBotDataRootPath(path: string): boolean {
   return false;
 }
 
-function testRealDataRootGuardActive(): boolean {
+export function testRealDataRootGuardActive(): boolean {
   return process.env.CODEX_GROK_TEST_HERMETIC === "1";
 }
 
@@ -242,7 +242,7 @@ export function assertNotRealGrokBotDataRoot(root: string): void {
   if (isLexicalGrokBotDataRootPath(root)) throw new TestRealDataRootError();
 }
 
-function sandUserDataDir(env: NodeJS.ProcessEnv): string | undefined {
+export function sandUserDataDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const value = env.SAND_USER_DATA_DIR?.trim();
   if (value === undefined || value === "") return undefined;
   return isAbsolute(value) ? value : resolve(value);

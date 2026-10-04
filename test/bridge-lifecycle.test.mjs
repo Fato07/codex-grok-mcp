@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
@@ -28,6 +28,7 @@ import {
   hermetic,
   removeHermeticFixtureBase,
   scrubGatewayEnv,
+  spyChildEnv,
 } from "./hermetic-setup.mjs";
 import {
   BridgeLifecycle,
@@ -41,6 +42,7 @@ import {
 import {
   DEFAULT_GROK_BOT_DATA_ROOT,
   grokBotDataRoot,
+  sandUserDataDir,
   TestRealDataRootError,
 } from "../dist/grok-bot-client.js";
 import { runBridgeCompanion } from "../dist/bridge-companion.js";
@@ -248,7 +250,7 @@ async function runDefaultLifecycle(command, environment) {
     }
   `;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-    env: environment,
+    env: spyChildEnv(environment),
     stdio: ["ignore", "pipe", "ignore"],
   });
   const output = [];
@@ -2942,10 +2944,8 @@ function pinnedManagedChildEnvironment(extra) {
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }
-  const sandUserDataDirectory = process.env.SAND_USER_DATA_DIR;
-  if (sandUserDataDirectory !== undefined && sandUserDataDirectory.trim() !== "") {
-    environment.SAND_USER_DATA_DIR = resolve(sandUserDataDirectory);
-  }
+  const userRoot = sandUserDataDir(process.env);
+  if (userRoot !== undefined) environment.SAND_USER_DATA_DIR = userRoot;
   return { ...environment, ...extra };
 }
 
@@ -2967,6 +2967,13 @@ test("managed child environment without the hermetic flag is byte-identical to t
   assert.equal(Buffer.from(JSON.stringify(child)).equals(Buffer.from(JSON.stringify(pinned))), true);
   assert.equal(Object.hasOwn(child, "CODEX_GROK_TEST_HERMETIC"), false);
   assert.deepEqual(Object.keys(child).sort(), Object.keys(pinned).sort());
+});
+
+test("managed child environment trims SAND_USER_DATA_DIR the same way as grokBotDataRoot", (context) => {
+  context.after(() => applyHermeticEnv());
+  process.env.SAND_USER_DATA_DIR = `  ${hermetic.base}  `;
+  const child = managedChildEnvironment({ CODEX_GROK_MANAGED_CONFIG_PATH: "managed" });
+  assert.equal(child.SAND_USER_DATA_DIR, hermetic.base);
 });
 
 test("managed child environment forwards the hermetic flag only when the parent has it", (context) => {
@@ -3016,7 +3023,7 @@ test("managed child with hermetic flag and real root fails before any read or co
     }
   `;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-    env: { PATH: process.env.PATH, ...childEnv },
+    env: spyChildEnv({ PATH: process.env.PATH, ...childEnv }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];
@@ -3056,7 +3063,7 @@ test("hermetic setup removes its fixture base on process exit", async () => {
   const childEnv = { ...process.env };
   delete childEnv.CODEX_GROK_TEST_HERMETIC;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-    env: childEnv,
+    env: spyChildEnv(childEnv),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];
