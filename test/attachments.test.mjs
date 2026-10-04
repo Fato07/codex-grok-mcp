@@ -11,6 +11,7 @@ import {
   McpServer,
 } from "@modelcontextprotocol/server";
 import { WebSocketServer } from "ws";
+import { setOpenedFdResolver, setAttachmentAccountHomes } from "./attachments-test-hooks.mjs";
 import { hermetic } from "./hermetic-setup.mjs";
 import {
   ATTACHMENT_HOST_ALLOWLIST_EXTRA_ENV,
@@ -26,7 +27,6 @@ import {
   resetAttachmentSessionStore,
   validateLocalAttachmentFile,
 } from "../dist/attachments.js";
-import { setOpenedFdResolver } from "../dist/attachments-test-hooks.js";
 import { handleBridgeRequest } from "../dist/bridge-companion.js";
 import {
   decryptFrame,
@@ -1483,33 +1483,66 @@ test("parent-directory swap after a confined open is ATTACHMENT_REJECTED", async
   }
 });
 
-test("outbound denies account-home credentials when HOME is spoofed", async (context) => {
-  const accountHome = join(hermetic.base, "account-home");
-  const spoofHome = join(hermetic.base, "spoof-home");
+test("outbound still rejects setter account-home credentials when hermetic env is spoofed", async (context) => {
+  const accountHome = join(hermetic.base, "sh2-account-home");
+  const spoofHome = join(hermetic.base, "sh2-spoof-home");
+  const decoyAccount = join(hermetic.base, "sh2-decoy-account");
   await mkdir(join(accountHome, ".grok"), { recursive: true, mode: 0o700 });
+  await mkdir(join(accountHome, ".codex"), { recursive: true, mode: 0o700 });
+  await mkdir(join(accountHome, ".config", "codex-grok-mcp"), { recursive: true, mode: 0o700 });
   await mkdir(spoofHome, { recursive: true, mode: 0o700 });
-  const auth = join(accountHome, ".grok", "auth.json");
-  await writeFile(auth, '{"token":"nope"}', { mode: 0o600 });
+  await mkdir(decoyAccount, { recursive: true, mode: 0o700 });
+  const grokAuth = join(accountHome, ".grok", "auth.json");
+  const codexAuth = join(accountHome, ".codex", "auth.json");
+  const pairing = join(accountHome, ".config", "codex-grok-mcp", "bridge.json");
+  await writeFile(grokAuth, '{"token":"grok"}', { mode: 0o600 });
+  await writeFile(codexAuth, '{"token":"codex"}', { mode: 0o600 });
+  await writeFile(pairing, '{"key":"pair"}', { mode: 0o600 });
   const previousHome = process.env.HOME;
   const previousAccount = process.env.CODEX_GROK_TEST_ACCOUNT_HOME;
   process.env.HOME = spoofHome;
-  process.env.CODEX_GROK_TEST_ACCOUNT_HOME = accountHome;
+  process.env.CODEX_GROK_TEST_HERMETIC = "1";
+  process.env.CODEX_GROK_TEST_ACCOUNT_HOME = decoyAccount;
+  setAttachmentAccountHomes([accountHome]);
   context.after(() => {
+    setAttachmentAccountHomes([hermetic.accountHome]);
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
     if (previousAccount === undefined) delete process.env.CODEX_GROK_TEST_ACCOUNT_HOME;
     else process.env.CODEX_GROK_TEST_ACCOUNT_HOME = previousAccount;
   });
-  assert.throws(
-    () =>
-      validateLocalAttachmentFile(auth, "auth.json", {
-        HOME: spoofHome,
-        CODEX_GROK_TEST_HERMETIC: "1",
-        CODEX_GROK_TEST_ACCOUNT_HOME: accountHome,
-        SAND_DATA_ROOT: hermetic.dataRoot,
-      }, spoofHome),
-    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
-  );
+  const env = {
+    HOME: spoofHome,
+    CODEX_GROK_TEST_HERMETIC: "1",
+    CODEX_GROK_TEST_ACCOUNT_HOME: decoyAccount,
+    SAND_DATA_ROOT: hermetic.dataRoot,
+  };
+  for (const [path, name] of [
+    [grokAuth, "auth.json"],
+    [codexAuth, "auth.json"],
+    [pairing, "bridge.json"],
+  ]) {
+    assert.throws(
+      () => validateLocalAttachmentFile(path, name, env, spoofHome),
+      (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+    );
+  }
+});
+
+test("outbound falls back to path realpath when /proc/self/fd is unavailable", async () => {
+  const safe = await writeText(hermetic.base, "fallback.txt", "hello fallback\n");
+  setOpenedFdResolver(() => {
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  });
+  try {
+    const decision = validateLocalAttachmentFile(safe, "fallback.txt", {
+      SAND_DATA_ROOT: hermetic.dataRoot,
+    }, hermetic.accountHome);
+    assert.equal(decision.bytes.toString("utf8"), "hello fallback\n");
+    assert.equal(decision.resolved_path, realpathSync(safe));
+  } finally {
+    setOpenedFdResolver();
+  }
 });
 
 test("tool fetch rejects an oversize companion total_size on the first window", async () => {

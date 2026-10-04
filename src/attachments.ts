@@ -16,10 +16,39 @@ import {
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveOpenedFdPath } from "./attachments-test-hooks.js";
 import { defaultBridgeConfigPath } from "./bridge-pairing.js";
 import { defaultReplayRoot } from "./bridge-replay.js";
 import { TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
+
+const ATTACHMENT_TEST_HOOKS = Symbol.for("codex-grok-attachment-test-hooks");
+
+type AttachmentTestHooks = {
+  resolveOpenedFd?: (fd: number) => string;
+  accountHomes?: readonly string[];
+};
+
+function attachmentTestHooks(): AttachmentTestHooks | undefined {
+  const hooks = (globalThis as Record<PropertyKey, unknown>)[ATTACHMENT_TEST_HOOKS];
+  return typeof hooks === "object" && hooks !== null ? (hooks as AttachmentTestHooks) : undefined;
+}
+
+function resolveOpenedFdPath(fd: number): string | undefined {
+  const override = attachmentTestHooks()?.resolveOpenedFd;
+  if (override !== undefined) {
+    try {
+      return override(fd);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+      return undefined;
+    }
+  }
+  try {
+    return realpathSync(`/proc/self/fd/${String(fd)}`);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    return undefined;
+  }
+}
 
 export const ATTACHMENT_PROTOCOL_VERSION = 4 as const;
 export const ATTACHMENT_SEND_CAPABILITY = "attachment_send_v1" as const;
@@ -426,10 +455,9 @@ function accountHomes(environment: NodeJS.ProcessEnv, home: string): string[] {
   };
   add(home);
   add(environment.HOME);
-  const hermetic =
-    environment.CODEX_GROK_TEST_HERMETIC === "1" || process.env.CODEX_GROK_TEST_HERMETIC === "1";
-  if (hermetic) {
-    add(environment.CODEX_GROK_TEST_ACCOUNT_HOME ?? process.env.CODEX_GROK_TEST_ACCOUNT_HOME);
+  const override = attachmentTestHooks()?.accountHomes;
+  if (override !== undefined) {
+    for (const extra of override) add(extra);
     return [...homes];
   }
   add(homedir());

@@ -13,12 +13,20 @@
   "homepage": "https://fato07.github.io/codex-grok-mcp/",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "bin": {
     "codex-grok-mcp": "dist/index.js",
     "codex-grok-bridge": "dist/bridge-companion.js"
   },
   "files": [
     "dist",
+    "!dist/**/*test-hooks*",
     "relay/.dev.vars.example",
     "relay/README.md",
     "relay/package-lock.json",

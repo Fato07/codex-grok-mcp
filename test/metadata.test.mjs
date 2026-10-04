@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 import { GROK_MODELS } from "../dist/schema.js";
 import { CODEX_GROK_VERSION } from "../dist/version.js";
@@ -179,5 +183,19 @@ test("documented Grok models match the shared finite tuple", async () => {
     "GROK_MCP_MODEL allowed models",
     [...row[2].matchAll(/`([^`]+)`/g)].map((match) => match[1]),
     [...GROK_MODELS],
+  );
+});
+
+test("npm pack excludes attachment test-hooks files", async () => {
+  const { stdout } = await execFileAsync("npm", ["pack", "--dry-run", "--json"], {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+  });
+  const packs = JSON.parse(stdout);
+  const files = packs[0]?.files?.map((entry) => entry.path) ?? [];
+  assert.equal(
+    files.some((path) => path.includes("test-hooks")),
+    false,
+    `published files include test-hooks: ${files.filter((path) => path.includes("test-hooks")).join(", ")}`,
   );
 });

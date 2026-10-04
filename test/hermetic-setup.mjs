@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setAttachmentAccountHomes } from "./attachments-test-hooks.mjs";
 
 const STATE = Symbol.for("codex-grok-hermetic-setup");
 
@@ -53,7 +54,8 @@ export function applyHermeticEnv(env = process.env) {
   env.TMPDIR = fixture.base;
   env.HOME = fixture.accountHome;
   env.CODEX_GROK_TEST_HERMETIC = "1";
-  env.CODEX_GROK_TEST_ACCOUNT_HOME = fixture.accountHome;
+  delete env.CODEX_GROK_TEST_ACCOUNT_HOME;
+  setAttachmentAccountHomes([fixture.accountHome]);
   return fixture;
 }
 
