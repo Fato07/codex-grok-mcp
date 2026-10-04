@@ -1894,3 +1894,165 @@ setInterval(() => {}, 1_000);
   await assert.rejects(lstat(join(root, "releases")), { code: "ENOENT" });
   assert.equal((await lifecycle.run("uninstall")).changed, false);
 });
+
+test("release tree migration: restored box shape (dirs 0755, files 0600) recovers", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "release-tree-migration-"));
+  const root = join(sandbox, "lifecycle");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  
+  const testRelease = release("0.2.0-beta.8", 8);
+  await createFixtureRelease(root, testRelease.version, 8);
+  
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, testRelease.version);
+  const releaseDir = join(
+    versionDir,
+    Buffer.from(testRelease.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  
+  await chmod(releasesRoot, 0o755);
+  await chmod(versionDir, 0o755);
+  await chmod(releaseDir, 0o755);
+  
+  const beforeReleases = await lstat(releasesRoot);
+  const beforeVersion = await lstat(versionDir);
+  const beforeRelease = await lstat(releaseDir);
+  assert.equal(beforeReleases.mode & 0o777, 0o755);
+  assert.equal(beforeVersion.mode & 0o777, 0o755);
+  assert.equal(beforeRelease.mode & 0o777, 0o755);
+  
+  const { migrateReleaseTreePermissions } = await import("../dist/bridge-lifecycle.js");
+  await migrateReleaseTreePermissions(root, testRelease);
+  
+  const afterReleases = await lstat(releasesRoot);
+  const afterVersion = await lstat(versionDir);
+  const afterRelease = await lstat(releaseDir);
+  assert.equal(afterReleases.mode & 0o777, 0o700);
+  assert.equal(afterVersion.mode & 0o777, 0o700);
+  assert.equal(afterRelease.mode & 0o777, 0o700);
+  
+  await rm(sandbox, { recursive: true, force: true });
+});
+
+test("release tree migration: symlinked release dir fails", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "release-tree-symlink-"));
+  const root = join(sandbox, "lifecycle");
+  const configPath = join(sandbox, "config", "bridge.json");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  
+  const testRelease = release("0.2.0-beta.8", 8);
+  await createFixtureRelease(root, testRelease.version, 8);
+  
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, testRelease.version);
+  const releaseDir = join(
+    versionDir,
+    Buffer.from(testRelease.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  const targetDir = join(sandbox, "target");
+  await mkdir(targetDir, { mode: 0o700 });
+  await cp(releaseDir, join(targetDir, "release"), { recursive: true });
+  await rm(releaseDir, { recursive: true });
+  await symlink(join(targetDir, "release"), releaseDir);
+  
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    configPath,
+  );
+  
+  await assert.rejects(preflightLifecycleRelease(root, configPath, testRelease), {
+    message: "candidate_invalid",
+  });
+  
+  await rm(sandbox, { recursive: true, force: true });
+});
+
+test("release tree migration: special bits fail", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "release-tree-special-"));
+  const root = join(sandbox, "lifecycle");
+  const configPath = join(sandbox, "config", "bridge.json");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  
+  const testRelease = release("0.2.0-beta.8", 8);
+  await createFixtureRelease(root, testRelease.version, 8);
+  
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, testRelease.version);
+  const releaseDir = join(
+    versionDir,
+    Buffer.from(testRelease.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  
+  await chmod(releaseDir, 0o4755);
+  
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    configPath,
+  );
+  
+  await assert.rejects(preflightLifecycleRelease(root, configPath, testRelease), {
+    message: "candidate_invalid",
+  });
+  
+  await rm(sandbox, { recursive: true, force: true });
+});
+
+test("release tree migration: group-writable fails", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "release-tree-group-"));
+  const root = join(sandbox, "lifecycle");
+  const configPath = join(sandbox, "config", "bridge.json");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  
+  const testRelease = release("0.2.0-beta.8", 8);
+  await createFixtureRelease(root, testRelease.version, 8);
+  
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, testRelease.version);
+  const releaseDir = join(
+    versionDir,
+    Buffer.from(testRelease.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  
+  await chmod(releaseDir, 0o775);
+  
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    configPath,
+  );
+  
+  await assert.rejects(preflightLifecycleRelease(root, configPath, testRelease), {
+    message: "candidate_invalid",
+  });
+  
+  await rm(sandbox, { recursive: true, force: true });
+});
+
+test("release tree migration: world-writable fails", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "release-tree-world-"));
+  const root = join(sandbox, "lifecycle");
+  const configPath = join(sandbox, "config", "bridge.json");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  
+  const testRelease = release("0.2.0-beta.8", 8);
+  await createFixtureRelease(root, testRelease.version, 8);
+  
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, testRelease.version);
+  const releaseDir = join(
+    versionDir,
+    Buffer.from(testRelease.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  
+  await chmod(releaseDir, 0o757);
+  
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    configPath,
+  );
+  
+  await assert.rejects(preflightLifecycleRelease(root, configPath, testRelease), {
+    message: "candidate_invalid",
+  });
+  
+  await rm(sandbox, { recursive: true, force: true });
+});

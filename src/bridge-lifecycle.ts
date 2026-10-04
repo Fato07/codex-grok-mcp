@@ -931,6 +931,58 @@ async function readRegularJson(path: string, maxBytes: number): Promise<unknown>
   }
 }
 
+export async function migrateReleaseTreePermissions(root: string, release: LifecycleRelease): Promise<void> {
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, release.version);
+  const releaseDir = releaseDirectory(root, release);
+  
+  for (const dir of [releasesRoot, versionDir, releaseDir]) {
+    let details;
+    try {
+      details = await lstat(dir);
+    } catch (caught) {
+      if (isNodeError(caught) && caught.code === "ENOENT") continue;
+      fail("candidate_invalid");
+    }
+    
+    if (
+      details.isSymbolicLink() ||
+      !details.isDirectory() ||
+      details.uid !== currentUid() ||
+      (details.mode & 0o7000) !== 0 ||
+      (details.mode & 0o700) !== 0o700
+    ) {
+      fail("candidate_invalid");
+    }
+    
+    if ((details.mode & 0o7777) !== 0o700) {
+      const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+      const directoryOnly =
+        typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
+      const handle = await open(dir, fsConstants.O_RDONLY | noFollow | directoryOnly);
+      try {
+        const opened = await handle.stat();
+        if (
+          opened.dev !== details.dev ||
+          opened.ino !== details.ino ||
+          !opened.isDirectory() ||
+          opened.uid !== currentUid()
+        ) {
+          fail("candidate_invalid");
+        }
+        await handle.chmod(0o700);
+      } finally {
+        await handle.close();
+      }
+      const after = await lstat(dir);
+      if ((after.mode & 0o7777) !== 0o700) {
+        fail("candidate_invalid");
+      }
+    }
+  }
+  await assertTrustedDirectoryChain(releaseDir, "candidate_invalid");
+}
+
 async function verifyRelease(root: string, expected: LifecycleRelease): Promise<void> {
   const directory = releaseDirectory(root, expected);
   let canonicalDirectory: string;
@@ -1569,6 +1621,7 @@ export async function preflightLifecycleRelease(
   configPath: string,
   release: LifecycleRelease,
 ): Promise<void> {
+  await migrateReleaseTreePermissions(root, release);
   await verifyRelease(root, release);
   const result = await runProcess(
     process.execPath,
