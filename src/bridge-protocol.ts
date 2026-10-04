@@ -443,12 +443,15 @@ export const bridgeErrorCodeSchema = z.enum([
   "UPGRADE_REQUIRED",
 ]);
 
+export const bridgeErrorReasonSchema = z.enum(["GATEWAY_ENV_MISMATCH"]);
+
 const bridgeErrorSchema = z
   .object({
     code: bridgeErrorCodeSchema,
     delivery_may_have_occurred: z.boolean(),
     commit_may_have_occurred: z.boolean().optional(),
     request_id: z.string().min(1).max(512).optional(),
+    reason: bridgeErrorReasonSchema.optional(),
   })
   .strict();
 
@@ -576,3 +579,4 @@ export const bridgeResponseSchema = z.union([
 export type BridgeRequest = z.infer<typeof bridgeRequestSchema>;
 export type BridgeResponse = z.infer<typeof bridgeResponseSchema>;
 export type BridgeErrorCode = z.infer<typeof bridgeErrorCodeSchema>;
+export type BridgeErrorReason = z.infer<typeof bridgeErrorReasonSchema>;

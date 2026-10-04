@@ -23,6 +23,7 @@ import {
   bridgeResponseSchema,
   createBridgeReadSnapshot,
   type BridgeErrorCode,
+  type BridgeErrorReason,
   type BridgeRequest,
   type BridgeResponse,
 } from "./bridge-protocol.js";
@@ -78,7 +79,15 @@ const FRAME_AUTH_FAILED_CLOSE_CODE = 4401;
 const REQUEST_FRESHNESS_MS = 60_000;
 const REPLAY_RETENTION_MS = REQUEST_FRESHNESS_MS * 2;
 const MAX_RECENT_REQUESTS = 1_024;
-const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+export const RELAY_PING_INTERVAL_MS = 30_000;
+export const RELAY_PONG_DEADLINE_MS = 10_000;
+export const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+
+export type RunBridgeOptions = {
+  pingIntervalMs?: number;
+  pongDeadlineMs?: number;
+  reconnectDelaysMs?: readonly number[];
+};
 
 export type BridgeProbeClient = {
   discovery(): Pick<LocalGatewayDiscovery, "port" | "pid" | "hasToken">;
@@ -206,6 +215,7 @@ function responseError(
   deliveryMayHaveOccurred: boolean,
   requestId?: string,
   commitMayHaveOccurred?: boolean,
+  reason?: BridgeErrorReason,
 ): BridgeResponse {
   return {
     v: request.v,
@@ -217,7 +227,8 @@ function responseError(
       ...(commitMayHaveOccurred === undefined
         ? {}
         : { commit_may_have_occurred: commitMayHaveOccurred }),
-      ...(requestId === undefined ? {} : { request_id: requestId }),
+      ...(requestId === undefined || requestId === "" ? {} : { request_id: requestId }),
+      ...(reason === undefined ? {} : { reason }),
     },
   };
 }
@@ -236,7 +247,14 @@ function sdkFailure(
     return responseError(request, "UNAVAILABLE", sendStarted, undefined, commitMayHaveOccurred);
   }
   const code: BridgeErrorCode = caught.code;
-  return responseError(request, code, sendStarted, caught.requestId, commitMayHaveOccurred);
+  return responseError(
+    request,
+    code,
+    sendStarted,
+    caught.requestId,
+    commitMayHaveOccurred,
+    caught.reason === "GATEWAY_ENV_MISMATCH" ? "GATEWAY_ENV_MISMATCH" : undefined,
+  );
 }
 
 export async function handleBridgeRequest(
@@ -589,9 +607,11 @@ async function connectOnce(
   config: PairingConfig,
   client: BridgeClient,
   state: BridgeRuntimeState,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (signal?.aborted) return;
+  signal: AbortSignal | undefined,
+  liveness: { pingIntervalMs: number; pongDeadlineMs: number },
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+  let established = false;
   await new Promise<void>((resolve) => {
     const socket = new WebSocket(bridgeSocketUrl(config), {
       followRedirects: false,
@@ -601,10 +621,46 @@ async function connectOnce(
       perMessageDeflate: false,
     });
     let settled = false;
+    let pingTimer: ReturnType<typeof setInterval> | undefined;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const clearLiveness = (): void => {
+      if (pingTimer !== undefined) clearInterval(pingTimer);
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      pingTimer = undefined;
+      deadlineTimer = undefined;
+    };
+    const noteInbound = (): void => {
+      if (deadlineTimer !== undefined) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = undefined;
+      }
+    };
+    const armDeadline = (): void => {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      deadlineTimer = setTimeout(() => finish(), liveness.pongDeadlineMs);
+    };
+    const startLiveness = (): void => {
+      established = true;
+      pingTimer = setInterval(() => {
+        if (socket.readyState !== WebSocket.OPEN) {
+          finish();
+          return;
+        }
+        try {
+          socket.ping();
+        } catch {
+          finish();
+          return;
+        }
+        armDeadline();
+      }, liveness.pingIntervalMs);
+    };
 
     const finish = (): void => {
       if (settled) return;
       settled = true;
+      clearLiveness();
       signal?.removeEventListener("abort", onAbort);
       socket.removeAllListeners();
       socket.terminate();
@@ -612,8 +668,12 @@ async function connectOnce(
     };
     const onAbort = (): void => finish();
     signal?.addEventListener("abort", onAbort, { once: true });
+    socket.once("open", startLiveness);
+    socket.on("pong", noteInbound);
+    socket.on("ping", noteInbound);
 
     socket.on("message", (data, isBinary) => {
+      noteInbound();
       if (settled || signal?.aborted) return;
       const handler = (async () => {
         let request: BridgeRequest;
@@ -713,6 +773,7 @@ async function connectOnce(
     socket.once("close", finish);
     socket.once("error", finish);
   });
+  return established;
 }
 
 function waitForReconnect(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -738,8 +799,12 @@ export async function runBridge(
   replayRoot?: string,
   onReady?: () => Promise<void>,
   requestContext: BridgeRequestContext = {},
+  options: RunBridgeOptions = {},
 ): Promise<void> {
   let attempt = 0;
+  const pingIntervalMs = options.pingIntervalMs ?? RELAY_PING_INTERVAL_MS;
+  const pongDeadlineMs = options.pongDeadlineMs ?? RELAY_PONG_DEADLINE_MS;
+  const reconnectDelaysMs = options.reconnectDelaysMs ?? RECONNECT_DELAYS_MS;
   const state: BridgeRuntimeState = {
     activeHandlers: new Set(),
     busy: false,
@@ -754,9 +819,13 @@ export async function runBridge(
   await onReady?.();
   try {
     while (!signal?.aborted) {
-      await connectOnce(config, client, state, signal);
+      const established = await connectOnce(config, client, state, signal, {
+        pingIntervalMs,
+        pongDeadlineMs,
+      });
       if (signal?.aborted) break;
-      const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+      if (established) attempt = 0;
+      const delay = reconnectDelaysMs[Math.min(attempt, reconnectDelaysMs.length - 1)];
       await waitForReconnect(delay ?? 15_000, signal);
       attempt += 1;
     }

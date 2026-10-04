@@ -23,6 +23,9 @@ Prerelease. Stable `0.2.0` is not published; this beta carries every change sinc
 - A whitespace-padded `SAND_USER_DATA_DIR` is trimmed before it is resolved (`sandUserDataDir` in `src/grok-bot-client.ts`, used by `managedChildEnvironment`). Previously `'  /srv/u  '` was resolved relative to cwd.
 - A failed `update` or `rollback` target start restores the prior run state: the retained release is restarted only if the companion was running before the switch. A stopped companion stays stopped (`update_failed_restored`); `state.json` is unchanged and staging leftovers are removed.
 - `install` without a valid pairing now fails with `PAIRING_REQUIRED` before staging a release, writing bindings, or taking a lease, and leaves nothing on disk.
+- The companion detects a dead or half-open relay socket with a WebSocket ping (30 s) and pong/inbound-frame deadline (10 s), then follows the normal reconnect path. A send already in flight is not retried.
+- Reconnect backoff resets to the first delay after a healthy handshake. Failed attempts that never open still back off.
+- `GATEWAY_ENV_MISMATCH` is carried on the paired `CONFIG_INVALID` error so Codex can tell the operator to restart with the corrected `SAND_HOST_PORT`.
 
 ### Verified boundaries
 
