@@ -1064,14 +1064,8 @@ export async function runBridgeCompanion(
         : caught instanceof BridgeLifecycleError && caught.reason !== undefined
           ? caught.reason
           : undefined;
-    const message =
-      caught instanceof Error && caught.message !== error ? caught.message : undefined;
     stderr.write(
-      `${JSON.stringify({
-        error,
-        ...(reason === undefined ? {} : { reason }),
-        ...(message === undefined ? {} : { message }),
-      })}\n`,
+      `${JSON.stringify({ error, ...(reason === undefined ? {} : { reason }) })}\n`,
     );
     return 1;
   }

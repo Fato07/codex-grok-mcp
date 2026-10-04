@@ -631,6 +631,12 @@ test("default lifecycle rejects config, replay, and Grok data beneath releases",
   const sentinel = join(releases, "keep.txt");
   await mkdir(releases, { recursive: true, mode: 0o700 });
   await writeFile(sentinel, "keep\n", { mode: 0o600 });
+  const defaultConfigDir = join(parent, "config", "codex-grok-mcp");
+  await mkdir(defaultConfigDir, { recursive: true, mode: 0o700 });
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    join(defaultConfigDir, "bridge.json"),
+  );
 
   for (const protectedKind of ["config", "replay", "grok-data"]) {
     const environment = {
@@ -643,17 +649,17 @@ test("default lifecycle rejects config, replay, and Grok data beneath releases",
     delete environment.SAND_USER_DATA_DIR;
     if (protectedKind === "config") {
       environment.XDG_CONFIG_HOME = join(releases, "config-home");
+      const configDir = join(environment.XDG_CONFIG_HOME, "codex-grok-mcp");
+      await mkdir(configDir, { recursive: true, mode: 0o700 });
+      await savePairingConfig(
+        parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+        join(configDir, "bridge.json"),
+      );
     } else if (protectedKind === "replay") {
       environment.XDG_STATE_HOME = join(releases, "state-home");
     } else {
       environment.SAND_DATA_ROOT = join(releases, "sand-data");
     }
-    const configDir = join(environment.XDG_CONFIG_HOME, "codex-grok-mcp");
-    await mkdir(configDir, { recursive: true, mode: 0o700 });
-    await savePairingConfig(
-      parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
-      join(configDir, "bridge.json"),
-    );
     const attempt = await runDefaultLifecycle("install", environment);
     assert.equal(attempt.code, 1);
     assert.equal(attempt.result.ok, false);
