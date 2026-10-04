@@ -53,7 +53,7 @@
     "start": "node dist/index.js",
     "bridge:probe": "node dist/bridge-companion.js probe",
     "doctor": "node dist/index.js --doctor",
-    "test": "npm run build && node --test --import ./test/hermetic-setup.mjs --test-force-exit --test-timeout=180000 test/*.test.mjs",
+    "test": "npm run build && node --require ./test/real-root-fs-spy.cjs --test --import ./test/hermetic-setup.mjs --test-force-exit --test-timeout=180000 test/*.test.mjs",
     "test:relay": "npm --prefix relay run check && npm --prefix relay test",
     "test:all": "npm test && npm run test:relay",
     "prepublishOnly": "npm --prefix relay ci && npm run test:all",

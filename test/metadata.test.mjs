@@ -260,6 +260,18 @@ test("npm pack excludes attachment test-hooks files", async () => {
     const gateway = packedText["grok-bot-gateway.js"];
     assert.equal(gateway.includes("sandRoots"), false, "grok-bot-gateway.js exposes sandRoots");
     assert.equal(gateway.includes("homes:"), false, "grok-bot-gateway.js exposes homes override");
+    assert.equal(
+      files.some((path) => path.includes("real-root-fs-spy")),
+      false,
+      "packed files include real-root-fs-spy",
+    );
+    for (const name of distFiles) {
+      assert.equal(
+        packedText[name].includes("real-root-fs-spy"),
+        false,
+        `${name} mentions real-root-fs-spy`,
+      );
+    }
     assert.deepEqual(await distMtimes(sourceDist), before);
   } finally {
     await rm(dest, { recursive: true, force: true });

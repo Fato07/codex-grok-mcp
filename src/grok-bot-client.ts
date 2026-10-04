@@ -242,17 +242,32 @@ export function assertNotRealGrokBotDataRoot(root: string): void {
   if (isLexicalGrokBotDataRootPath(root)) throw new TestRealDataRootError();
 }
 
+function sandUserDataDir(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env.SAND_USER_DATA_DIR?.trim();
+  if (value === undefined || value === "") return undefined;
+  return isAbsolute(value) ? value : resolve(value);
+}
+
+export function candidateGrokBotDataRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const roots = new Set<string>(GROK_BOT_DATA_ROOTS);
+  if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
+    roots.add(env.SAND_DATA_ROOT);
+  }
+  const userRoot = sandUserDataDir(env);
+  if (userRoot !== undefined) {
+    roots.add(join(userRoot, "sand-data"));
+    roots.add(join(userRoot, "agent-data"));
+  }
+  return [...roots];
+}
+
 export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {
   let root: string;
   if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
     root = env.SAND_DATA_ROOT;
-  } else if (env.SAND_USER_DATA_DIR !== undefined && env.SAND_USER_DATA_DIR.trim() !== "") {
-    const userRoot = isAbsolute(env.SAND_USER_DATA_DIR)
-      ? env.SAND_USER_DATA_DIR
-      : resolve(env.SAND_USER_DATA_DIR);
-    root = join(userRoot, "sand-data");
   } else {
-    root = DEFAULT_SAND_ROOT;
+    const userRoot = sandUserDataDir(env);
+    root = userRoot === undefined ? DEFAULT_SAND_ROOT : join(userRoot, "sand-data");
   }
   assertNotRealGrokBotDataRoot(root);
   return root;

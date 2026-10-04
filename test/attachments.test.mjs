@@ -1674,6 +1674,45 @@ test("outbound denies credential paths that differ only by case on a case-insens
   }
 });
 
+test("empty AttachmentPathGuard homes or sandRoots is rejected", async () => {
+  const safe = await writeText(hermetic.base, "empty-guard.txt", "hello attachment\n");
+  const env = { HOME: hermetic.accountHome, SAND_DATA_ROOT: hermetic.dataRoot };
+  assert.throws(
+    () =>
+      validateLocalAttachmentFile(safe, "note.txt", env, hermetic.accountHome, {
+        homes: [],
+        sandRoots: [hermetic.defaultSandRoot],
+      }),
+    (caught) => caught instanceof TypeError && /homes/.test(caught.message),
+  );
+  assert.throws(
+    () =>
+      validateLocalAttachmentFile(safe, "note.txt", env, hermetic.accountHome, {
+        homes: [hermetic.accountHome],
+        sandRoots: [],
+      }),
+    (caught) => caught instanceof TypeError && /sandRoots/.test(caught.message),
+  );
+});
+
+test("outbound without sandRoots still denies the fixed default and legacy roots", () => {
+  const home = join(hermetic.base, "fallback-home");
+  const env = { HOME: home, SAND_DATA_ROOT: hermetic.dataRoot };
+  const fakeStats = { dev: 1, ino: 99, isFile: () => true, isDirectory: () => false };
+  const guard = { homes: [home] };
+  for (const path of [
+    join(DEFAULT_GROK_BOT_DATA_ROOT, "gateway.json"),
+    join(DEFAULT_GROK_BOT_DATA_ROOT, "config", "c.json"),
+    join(LEGACY_GROK_BOT_DATA_ROOT, "gateway.json"),
+    join(LEGACY_GROK_BOT_DATA_ROOT, "config", "c.json"),
+  ]) {
+    assert.throws(
+      () => assertNotSensitiveAttachmentSource(path, fakeStats, env, home, guard),
+      (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+    );
+  }
+});
+
 test("outbound still denies default and legacy sand roots when SAND_DATA_ROOT is redirected", async () => {
   const home = join(hermetic.base, "g1-home");
   const redirected = join(hermetic.base, "g1-sand");
@@ -1703,6 +1742,63 @@ test("outbound still denies default and legacy sand roots when SAND_DATA_ROOT is
           home,
           guard,
         ),
+      (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+    );
+  }
+});
+
+test("outbound denies every Sand candidate when SAND_DATA_ROOT and SAND_USER_DATA_DIR are both set", async () => {
+  const home = join(hermetic.base, "g1d-home");
+  const dataRoot = join(hermetic.base, "g1d-sand-data-root");
+  const userRoot = join(hermetic.base, "g1d-user-data");
+  const userSand = join(userRoot, "sand-data");
+  const userAgent = join(userRoot, "agent-data");
+  const defaultRoot = join(hermetic.base, "g1d-default-sand");
+  const legacyRoot = join(hermetic.base, "g1d-legacy-sand");
+  for (const root of [dataRoot, userSand, userAgent, defaultRoot, legacyRoot]) {
+    await mkdir(join(root, "config"), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, "gateway.json"), '{"port":1}\n', { mode: 0o600 });
+    await writeFile(join(root, "config", "c.json"), '{"x":1}\n', { mode: 0o600 });
+  }
+  const env = {
+    HOME: home,
+    SAND_DATA_ROOT: dataRoot,
+    SAND_USER_DATA_DIR: userRoot,
+  };
+  const guard = attachmentGuard(home, { sandRoots: [defaultRoot, legacyRoot] });
+  for (const path of [
+    join(dataRoot, "gateway.json"),
+    join(dataRoot, "config", "c.json"),
+    join(userSand, "gateway.json"),
+    join(userSand, "config", "c.json"),
+    join(userAgent, "gateway.json"),
+    join(userAgent, "config", "c.json"),
+    join(defaultRoot, "gateway.json"),
+    join(defaultRoot, "config", "c.json"),
+    join(legacyRoot, "gateway.json"),
+    join(legacyRoot, "config", "c.json"),
+  ]) {
+    assert.throws(
+      () =>
+        validateLocalAttachmentFile(
+          path,
+          path.endsWith(".json") ? "note.json" : "note.txt",
+          env,
+          home,
+          guard,
+        ),
+      (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+    );
+  }
+  const fakeStats = { dev: 1, ino: 99, isFile: () => true, isDirectory: () => false };
+  for (const path of [
+    join(DEFAULT_GROK_BOT_DATA_ROOT, "gateway.json"),
+    join(DEFAULT_GROK_BOT_DATA_ROOT, "config", "c.json"),
+    join(LEGACY_GROK_BOT_DATA_ROOT, "gateway.json"),
+    join(LEGACY_GROK_BOT_DATA_ROOT, "config", "c.json"),
+  ]) {
+    assert.throws(
+      () => assertNotSensitiveAttachmentSource(path, fakeStats, env, home, guard),
       (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
     );
   }

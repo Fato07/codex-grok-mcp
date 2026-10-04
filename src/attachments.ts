@@ -16,7 +16,12 @@ import {
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GROK_BOT_DATA_ROOTS, TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
+import {
+  TestRealDataRootError,
+  candidateGrokBotDataRoots,
+  grokBotDataRoot,
+  isLexicalGrokBotDataRootPath,
+} from "./grok-bot-client.js";
 
 export type AttachmentPathGuard = {
   homes?: readonly string[];
@@ -470,6 +475,17 @@ function assertRegularFile(path: string): Stats {
   }
 }
 
+function requireAddedGuardList(
+  value: readonly string[] | undefined,
+  label: "homes" | "sandRoots",
+): readonly string[] {
+  if (value === undefined) return [];
+  if (value.length === 0) {
+    throw new TypeError(`AttachmentPathGuard.${label} must not be empty`);
+  }
+  return value;
+}
+
 function accountHomes(
   environment: NodeJS.ProcessEnv,
   home: string,
@@ -488,15 +504,14 @@ function accountHomes(
   };
   add(home);
   add(environment.HOME);
-  if (extraHomes !== undefined) {
-    for (const extra of extraHomes) add(extra);
-    return [...homes];
-  }
   add(homedir());
   try {
     add(userInfo().homedir);
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
+  }
+  if (extraHomes !== undefined) {
+    for (const extra of extraHomes) add(extra);
   }
   return [...homes];
 }
@@ -514,12 +529,19 @@ function deniedAttachmentLocations(
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
   guard?: AttachmentPathGuard,
-): { prefixes: string[]; files: string[] } {
+): { prefixes: string[]; files: string[]; lexicalOnly: Set<string> } {
   const prefixes: string[] = [];
   const files: string[] = [];
-  const remember = (target: string[], value: string): void => {
+  const lexicalOnly = new Set<string>();
+  const extraHomes = requireAddedGuardList(guard?.homes, "homes");
+  const extraSandRoots = requireAddedGuardList(guard?.sandRoots, "sandRoots");
+  const remember = (target: string[], value: string, lexical = false): void => {
     const resolved = resolve(value);
     target.push(resolved);
+    if (lexical) {
+      lexicalOnly.add(resolved);
+      return;
+    }
     try {
       const real = nativeRealpath(resolved);
       if (real !== resolved) target.push(real);
@@ -527,17 +549,17 @@ function deniedAttachmentLocations(
       if (caught instanceof TestRealDataRootError) throw caught;
     }
   };
-  const addPrefix = (value: string): void => {
-    remember(prefixes, value);
+  const addPrefix = (value: string, lexical = false): void => {
+    remember(prefixes, value, lexical);
   };
-  const addFile = (value: string): void => {
-    remember(files, value);
+  const addFile = (value: string, lexical = false): void => {
+    remember(files, value, lexical);
   };
-  const addSandRootSecrets = (root: string): void => {
-    addFile(join(root, "gateway.json"));
-    addPrefix(join(root, "config"));
+  const addSandRootSecrets = (root: string, lexical = false): void => {
+    addFile(join(root, "gateway.json"), lexical);
+    addPrefix(join(root, "config"), lexical);
   };
-  for (const candidate of accountHomes(environment, home, guard?.homes)) {
+  for (const candidate of accountHomes(environment, home, extraHomes)) {
     addPrefix(join(candidate, ".grok"));
     addPrefix(join(candidate, ".codex"));
     addPrefix(join(candidate, ".ssh"));
@@ -569,13 +591,16 @@ function deniedAttachmentLocations(
   if (configuredAuth !== undefined && configuredAuth !== "") {
     addFile(isAbsolute(configuredAuth) ? configuredAuth : resolve(configuredAuth));
   }
-  for (const root of guard?.sandRoots ?? GROK_BOT_DATA_ROOTS) addSandRootSecrets(root);
   try {
-    addSandRootSecrets(grokBotDataRoot(environment));
+    grokBotDataRoot(environment);
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
   }
-  return { prefixes, files };
+  for (const root of extraSandRoots) addSandRootSecrets(root);
+  for (const root of candidateGrokBotDataRoots(environment)) {
+    addSandRootSecrets(root, guard !== undefined && isLexicalGrokBotDataRootPath(root));
+  }
+  return { prefixes, files, lexicalOnly };
 }
 
 function pinPathIdentity(path: string, identities: Set<string>, directoriesOnly = false): void {
@@ -643,7 +668,7 @@ export function assertNotSensitiveAttachmentSource(
   guard?: AttachmentPathGuard,
   opened?: { fd: number; resolveOpenedFd?: (fd: number) => string },
 ): void {
-  const { prefixes, files } = deniedAttachmentLocations(environment, home, guard);
+  const { prefixes, files, lexicalOnly } = deniedAttachmentLocations(environment, home, guard);
   const resolved = resolve(resolvedPath);
   for (const prefix of prefixes) {
     if (pathIsUnder(resolved, prefix)) fail("ATTACHMENT_REJECTED");
@@ -651,10 +676,10 @@ export function assertNotSensitiveAttachmentSource(
   const identities = new Set<string>();
   for (const file of files) {
     if (pathsEqual(resolved, file)) fail("ATTACHMENT_REJECTED");
-    pinPathIdentity(file, identities);
+    if (lexicalOnly.has(file) === false) pinPathIdentity(file, identities);
   }
   if (identities.has(`${stats.dev}:${stats.ino}`)) fail("ATTACHMENT_REJECTED");
-  const deniedDirs = deniedDirectoryIdentities(prefixes);
+  const deniedDirs = deniedDirectoryIdentities(prefixes.filter((prefix) => lexicalOnly.has(prefix) === false));
   if (deniedDirs.size === 0) return;
   const ancestors = ancestorDirectoryIdentities(resolved, opened?.fd, opened?.resolveOpenedFd);
   for (const identity of ancestors) {
@@ -713,7 +738,13 @@ export function validateLocalAttachmentFile(
       resolved_path: resolvedPath,
     };
   } catch (caught) {
-    if (caught instanceof TestRealDataRootError || caught instanceof AttachmentError) throw caught;
+    if (
+      caught instanceof TestRealDataRootError ||
+      caught instanceof AttachmentError ||
+      caught instanceof TypeError
+    ) {
+      throw caught;
+    }
     throw new AttachmentError("ATTACHMENT_REJECTED");
   } finally {
     closeSync(fd);

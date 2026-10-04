@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+const MARK = Symbol.for("codex-grok-real-root-fs-spy");
 const roots = ["/home/box/sand-data", "/home/box/agent-data"].map((root) => path.resolve(root));
 const hits = [];
 
@@ -22,34 +23,42 @@ function wrap(target, name) {
   Object.defineProperty(target[name], "name", { value: original.name });
 }
 
-const originalRealpathNative =
-  typeof fs.realpathSync === "function" && typeof fs.realpathSync.native === "function"
-    ? fs.realpathSync.native
-    : undefined;
-for (const name of [
-  "lstatSync",
-  "statSync",
-  "realpathSync",
-  "readlinkSync",
-  "openSync",
-  "lstat",
-  "stat",
-  "realpath",
-  "readlink",
-  "open",
-]) {
-  wrap(fs, name);
-  wrap(fs.promises, name);
-}
-if (originalRealpathNative !== undefined) {
-  fs.realpathSync.native = function wrappedRealpathNative(...args) {
-    if (touchesRealRoot(args[0])) hits.push(`realpathSync.native:${args[0]}`);
-    return originalRealpathNative.apply(this, args);
-  };
+if (globalThis[MARK] !== true) {
+  globalThis[MARK] = true;
+  const originalRealpathNative =
+    typeof fs.realpathSync === "function" && typeof fs.realpathSync.native === "function"
+      ? fs.realpathSync.native
+      : undefined;
+  for (const name of [
+    "lstatSync",
+    "statSync",
+    "realpathSync",
+    "readlinkSync",
+    "openSync",
+    "lstat",
+    "stat",
+    "realpath",
+    "readlink",
+    "open",
+  ]) {
+    wrap(fs, name);
+    wrap(fs.promises, name);
+  }
+  if (originalRealpathNative !== undefined) {
+    fs.realpathSync.native = function wrappedRealpathNative(...args) {
+      if (touchesRealRoot(args[0])) hits.push(`realpathSync.native:${args[0]}`);
+      return originalRealpathNative.apply(this, args);
+    };
+  }
+  process.on("exit", () => {
+    if (hits.length === 0) return;
+    process.stderr.write(`REAL_ROOT_SYSCALLS ${JSON.stringify(hits)}\n`);
+    process.exitCode = 1;
+  });
 }
 
-process.on("exit", () => {
-  if (hits.length === 0) return;
-  process.stderr.write(`REAL_ROOT_SYSCALLS ${JSON.stringify(hits)}\n`);
-  process.exitCode = 1;
-});
+const requireFlag = `--require ${__filename}`;
+const current = process.env.NODE_OPTIONS ?? "";
+if (current.includes("real-root-fs-spy.cjs") === false && current.includes(__filename) === false) {
+  process.env.NODE_OPTIONS = current.trim() === "" ? requireFlag : `${current} ${requireFlag}`;
+}
