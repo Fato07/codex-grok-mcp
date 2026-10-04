@@ -202,7 +202,7 @@ test("npm pack excludes attachment test-hooks files", async () => {
     const packed = JSON.parse(await readFile(join(repo, "package.json"), "utf8"));
     delete packed.scripts?.prepare;
     delete packed.scripts?.prepublishOnly;
-    packed.files = ["dist"];
+    packed.files = ["dist", "!dist/**/*test-hooks*"];
     await mkdir(pkgDir, { recursive: true });
     await cp(sourceDist, join(pkgDir, "dist"), { recursive: true });
     await writeFile(join(pkgDir, "package.json"), `${JSON.stringify(packed, null, 2)}\n`);
