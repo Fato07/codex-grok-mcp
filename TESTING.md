@@ -15,7 +15,7 @@ Linux-only tests skip on macOS. The Linux total must equal macOS pass + skip. Cu
 - Linux kills a candidate that acquires its lease then emits malformed readiness
 - Linux lifecycle recovers a stale pre-binding process and completes upgrade and removal
 - Linux lifecycle update from stale never preflights the retained release
-- Linux start-id recovery distinguishes a reused pid from the original companion
+- managed stop verifies Linux process identity and waits for owner release
 - gateway verification accepts genuine gateway with clock skew (VM pause)
 - gateway verification fails for reused PID without listening socket
 - gateway verification rejects descriptor startedAt in the future
