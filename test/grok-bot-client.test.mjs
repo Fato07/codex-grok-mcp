@@ -6,10 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  DEFAULT_GROK_BOT_DATA_ROOT,
+  grokBotDataRoot,
   LocalGatewayError,
   LocalGrokBotClient,
   TestRealDataRootError,
 } from "../dist/grok-bot-client.js";
+import { applyHermeticEnv } from "./hermetic-setup.mjs";
 
 async function writeSecureDiscovery(path, descriptor) {
   await writeFile(path, JSON.stringify(descriptor), { mode: 0o600 });
@@ -559,9 +562,24 @@ test("env port or bind host that disagrees with gateway.json is a named mismatch
   );
 });
 
-test("client aimed at the real default data root fails with the guard error", () => {
-  const previous = process.exitCode;
+function captureStderr(operation) {
+  const chunks = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk, encoding, callback) => {
+    chunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    return original.call(process.stderr, chunk, encoding, callback);
+  };
+  const exitCode = process.exitCode;
   try {
+    return { value: operation(), stderr: chunks.join(""), exitCode: process.exitCode };
+  } finally {
+    process.stderr.write = original;
+    process.exitCode = exitCode;
+  }
+}
+
+test("client aimed at the real default data root fails with the guard error", () => {
+  const captured = captureStderr(() => {
     assert.throws(
       () => new LocalGrokBotClient({ env: {}, verifyServer: () => true }),
       (caught) => {
@@ -571,7 +589,46 @@ test("client aimed at the real default data root fails with the guard error", ()
         return true;
       },
     );
-  } finally {
-    process.exitCode = previous;
-  }
+  });
+  assert.equal(captured.stderr, "");
+  assert.equal(captured.exitCode, process.exitCode);
+});
+
+test("without the hermetic flag a non-real SAND_DATA_ROOT resolves with no side effects", (context) => {
+  context.after(() => applyHermeticEnv());
+  delete process.env.CODEX_GROK_TEST_HERMETIC;
+  const fixture = join(tmpdir(), "codex-grok-nonreal-root");
+  process.env.SAND_DATA_ROOT = fixture;
+  const captured = captureStderr(() => {
+    assert.equal(grokBotDataRoot({ SAND_DATA_ROOT: fixture }), fixture);
+    assert.equal(grokBotDataRoot({}), DEFAULT_GROK_BOT_DATA_ROOT);
+    assert.equal(grokBotDataRoot(), fixture);
+  });
+  assert.equal(captured.stderr, "");
+  assert.equal(captured.exitCode, process.exitCode);
+});
+
+test("without the hermetic flag the real root matches production resolution", (context) => {
+  context.after(() => applyHermeticEnv());
+  delete process.env.CODEX_GROK_TEST_HERMETIC;
+  const captured = captureStderr(() => {
+    assert.equal(
+      grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
+      DEFAULT_GROK_BOT_DATA_ROOT,
+    );
+    assert.equal(grokBotDataRoot({}), DEFAULT_GROK_BOT_DATA_ROOT);
+  });
+  assert.equal(captured.stderr, "");
+  assert.equal(captured.exitCode, process.exitCode);
+});
+
+test("with the hermetic flag the real root throws TestRealDataRootError", () => {
+  const captured = captureStderr(() => {
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
+  });
+  assert.equal(captured.stderr, "");
+  assert.equal(captured.exitCode, process.exitCode);
 });

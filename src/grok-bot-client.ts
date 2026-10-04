@@ -140,8 +140,6 @@ export class TestRealDataRootError extends Error {
   constructor() {
     super(TEST_REAL_DATA_ROOT_MESSAGE);
     this.name = "TestRealDataRootError";
-    process.exitCode = 1;
-    process.stderr.write(`${TEST_REAL_DATA_ROOT_MESSAGE}\n`);
   }
 }
 
@@ -221,10 +219,7 @@ function isRealGrokBotDataRoot(resolved: string): boolean {
 }
 
 function testRealDataRootGuardActive(): boolean {
-  if (process.env.CODEX_GROK_TEST_HERMETIC === "1") return true;
-  const fixture = process.env.SAND_DATA_ROOT;
-  if (fixture === undefined || !isAbsolute(fixture)) return false;
-  return !isRealGrokBotDataRoot(existingRealpath(fixture) ?? resolve(fixture));
+  return process.env.CODEX_GROK_TEST_HERMETIC === "1";
 }
 
 export function assertNotRealGrokBotDataRoot(root: string): void {
