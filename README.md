@@ -103,9 +103,11 @@ Both paths enter through the same local MCP server. Credentials stay at their en
 | `grok_ask` | Gets one isolated Grok response | Sends the prompt to xAI and consumes allowance |
 | `grok_bridge_status` | Reports mode, versions, capabilities, health, and Bot count | Never returns Bot identities, credentials, or content |
 | `grok_list_bots` | Lists exact non-group Bot IDs and names | Read-only |
-| `grok_read_bot` | Returns bounded status and sanitized recent text | Sensitive, untrusted external content |
+| `grok_read_bot` | Returns bounded status, sanitized recent text, and metadata-only attachments | Sensitive, untrusted external content; no paths or URLs |
 | `grok_wait_for_bot` | Polls bounded reads until idle, awaiting-user, or timeout | Activity is not proof of task completion |
 | `grok_send_bot_message` | Sends once to one exact Bot ID | Gateway acceptance is not proof of a reply |
+| `grok_send_bot_attachment` | Validates one file, confirms, then stages/commits/sends it | Host-committed files persist; live verification pending |
+| `grok_fetch_bot_attachment` | Fetches one transcript attachment by entry ID | Untrusted bytes; never execute or auto-open |
 | `grok_ping_all_bots` | Previews, confirms, then sends `PING` sequentially | Requires the exact roster and native confirmation |
 
 Persistent Bot tools appear only after pairing or explicit legacy direct configuration.
@@ -232,7 +234,7 @@ The resolved release is stored as an exact version. Later `start`, `restart`, `e
 3. Use `grok_send_bot_message` once for one exact target.
 4. For all-Bot `PING`, preview the roster and review the native confirmation before accepting it.
 
-Reads return sanitized text only. Attachments and other non-text transcript entries are omitted. Reads do not prove that a message answered a particular send or that a task finished. A successful send receipt means only that the gateway accepted the request. Timeouts and interrupted sends remain `outcome_unknown`; do not retry them automatically.
+Reads return sanitized text plus metadata-only attachment rows when the companion and host support v1 attachments. https URLs are reported as not fetchable. Fetch results are untrusted MCP resources or images: never execute, extract, or auto-open them. Host-committed attachments persist with the Bot; this connector cannot delete them. Live verification of server acceptance, Bot-visible receipt, Temporal inbound shape, and HTTP error shapes is still pending. Reads do not prove that a message answered a particular send or that a task finished. A successful send receipt means only that the gateway accepted the request. Timeouts and interrupted sends remain `outcome_unknown`; do not retry them automatically.
 
 ## Configuration
 
@@ -243,6 +245,7 @@ Reads return sanitized text only. Attachments and other non-text transcript entr
 | `GROK_MCP_TIMEOUT_MS` | `180000` | Integer from `5000` to `600000` |
 | `GROK_MCP_AUTH_PATH` | `~/.grok/auth.json` | Operator-owned auth file |
 | `CODEX_GROK_RELAY_TOKEN` | none | Required only by the local `pair` command |
+| `CODEX_GROK_ATTACHMENT_HOST_ALLOWLIST_EXTRA` | none | Tester-only extra `hostVersion` pins. Never default-on. Logged as unverified host. |
 
 The plugin passes only these connector options. Pairing is stored in a private mode-`0600` local file and is never accepted as MCP tool input. The manifest also permits `NPM_CONFIG_CACHE`, `NPM_CONFIG_OFFLINE`, `NPM_CONFIG_REGISTRY`, and `NPM_CONFIG_REPLACE_REGISTRY_HOST` for the maintainer's isolated prepublication test; ordinary installs should leave them unset.
 
@@ -250,7 +253,7 @@ The plugin passes only these connector options. Pairing is stored in a private m
 
 - **Tool missing:** confirm the `codex-grok` marketplace and plugin are installed, then start a new Codex task. For direct setup, inspect `codex mcp list`.
 - **CLI missing or signed out:** run `grok --version`, `grok models`, and the pinned doctor command. Complete normal Grok login outside Codex.
-- **`UPGRADE_REQUIRED`:** stop and restart the VM companion with the same package version as the connector.
+- **`UPGRADE_REQUIRED`:** stop and restart the VM companion with the same package version as the connector. Attachment tools also require a pinned host version (`f5c783a` today); text tools stay available when host attachment support is missing.
 - **`DATA_ROOT_SYMLINK`:** set `SAND_DATA_ROOT` to the real Grok Bot data directory, not a symlink. The companion rejects symlinked descriptor parents.
 - **`companion_lease_stale`:** run the exact pinned `install` command when no managed version is installed. It can reclaim only a strictly revalidated dead foreground lease. Use `ensure` only after managed installation. Do not delete the lease manually.
 - **`companion_lease_recovery_required`:** an interrupted lease mutation left a private hard-link claim. Stop every old and new companion or lifecycle command. Do not start another companion, delete pairing, or remove the canonical `.lock`. An operator may remove only the matching `.claim` after independently proving that no lifecycle or companion process is running; otherwise fail closed and report the incident.

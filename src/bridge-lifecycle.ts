@@ -17,7 +17,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { grokBotDataRoot } from "./grok-bot-client.js";
+import { grokBotDataRoot, sandUserDataDir } from "./grok-bot-client.js";
 import {
   defaultBridgeConfigPath,
   loadPairingConfigSnapshot,
@@ -1785,10 +1785,8 @@ export function managedChildEnvironment(extra: NodeJS.ProcessEnv): NodeJS.Proces
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }
-  const sandUserDataDirectory = process.env.SAND_USER_DATA_DIR;
-  if (sandUserDataDirectory !== undefined && sandUserDataDirectory.trim() !== "") {
-    environment.SAND_USER_DATA_DIR = resolve(sandUserDataDirectory);
-  }
+  const userRoot = sandUserDataDir(process.env);
+  if (userRoot !== undefined) environment.SAND_USER_DATA_DIR = userRoot;
   const hermeticFlag = process.env.CODEX_GROK_TEST_HERMETIC;
   if (hermeticFlag !== undefined) {
     environment.CODEX_GROK_TEST_HERMETIC = hermeticFlag;

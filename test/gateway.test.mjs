@@ -376,7 +376,7 @@ test("read Bot returns bounded untrusted text with a Bot-bound opaque cursor", a
     assert.deepEqual(calls.at(-1), {
       operation: "readBot",
       botId: BOTS[0].id,
-      options: { limit: 5, beforeSequence: 6 },
+      options: { limit: 5, beforeSequence: 6, protocolVersion: 4 },
     });
 
     const nonProgressing = await mcp.request("tools/call", {
@@ -872,6 +872,8 @@ test("configured gateway exposes roster and exact-ID send with an acceptance rec
         "grok_wait_for_bot",
         "grok_send_bot_message",
         "grok_ping_all_bots",
+        "grok_send_bot_attachment",
+        "grok_fetch_bot_attachment",
       ],
     );
 

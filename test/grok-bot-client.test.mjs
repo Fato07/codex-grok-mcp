@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_GROK_BOT_DATA_ROOT,
+  GROK_BOT_DATA_ROOTS,
+  LEGACY_GROK_BOT_DATA_ROOT,
+  candidateGrokBotDataRoots,
   grokBotDataRoot,
   LocalGatewayError,
   LocalGrokBotClient,
@@ -628,7 +631,49 @@ test("with the hermetic flag the real root throws TestRealDataRootError", () => 
       () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
       (caught) => caught instanceof TestRealDataRootError,
     );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: `${DEFAULT_GROK_BOT_DATA_ROOT}/./` }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: join(DEFAULT_GROK_BOT_DATA_ROOT, "..", "sand-data") }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
   });
   assert.equal(captured.stderr, "");
   assert.equal(captured.exitCode, process.exitCode);
+});
+
+test("candidate Sand roots include every env derivation plus the fixed defaults", () => {
+  const user = join(tmpdir(), "codex-grok-user-data");
+  const dataRoot = join(tmpdir(), "codex-grok-data-root");
+  assert.deepEqual(candidateGrokBotDataRoots({}), [...GROK_BOT_DATA_ROOTS]);
+  assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_DATA_ROOT: dataRoot })),
+    new Set([...GROK_BOT_DATA_ROOTS, dataRoot]),
+  );
+  assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_USER_DATA_DIR: user })),
+    new Set([...GROK_BOT_DATA_ROOTS, join(user, "sand-data"), join(user, "agent-data")]),
+  );
+  assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_USER_DATA_DIR: `  ${user}  ` })),
+    new Set([...GROK_BOT_DATA_ROOTS, join(user, "sand-data"), join(user, "agent-data")]),
+  );
+  assert.deepEqual(
+    new Set(
+      candidateGrokBotDataRoots({
+        SAND_DATA_ROOT: dataRoot,
+        SAND_USER_DATA_DIR: user,
+      }),
+    ),
+    new Set([
+      ...GROK_BOT_DATA_ROOTS,
+      dataRoot,
+      join(user, "sand-data"),
+      join(user, "agent-data"),
+    ]),
+  );
+  assert.ok(GROK_BOT_DATA_ROOTS.includes(DEFAULT_GROK_BOT_DATA_ROOT));
+  assert.ok(GROK_BOT_DATA_ROOTS.includes(LEGACY_GROK_BOT_DATA_ROOT));
 });

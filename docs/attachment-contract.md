@@ -1,6 +1,33 @@
 # Grok Bot attachment contract research
 
-Status: 2026-09-04. Static research pass complete; live contract verification and production attachment support remain blocked. No attachment was uploaded or read, no Bot prompt was sent, and no Bot or transcript was inspected. Keep [issue #11](https://github.com/Fato07/codex-grok-mcp/issues/11) open.
+Status: 2026-10-04. Bounded Bot attachments (#12 inbound, #13 outbound) are implemented on protocol v4. **Live verification is pending** and requires separate approval. Host-committed attachments persist with the Bot; this connector cannot delete them.
+
+The v1 connector contract (Bridge Lead decisions, host pin `f5c783a`):
+
+- Capabilities `attachment_send_v1` and `attachment_read_v1` are advertised only after `getHostStatus.hostVersion` is on the pinned allowlist. Tester override: `CODEX_GROK_ATTACHMENT_HOST_ALLOWLIST_EXTRA` (explicit, logged as unverified host, never default-on).
+- Outbound: one regular file, no symlinks, `O_NOFOLLOW`, ≤2 MiB, extension and magic allowlist, SHA-256, native confirmation, 64 KiB replay-checked relay chunks, private 0700/0600 companion staging with a 15-minute TTL, one `uploadAttachment`, opaque `attachment_ref`, then `send_message` with exactly one ref.
+- Inbound: `read_bot` v4 metadata-only `attachments[]`; `attachment_fetch` re-reads a fresh tail and takes the path from that entry only. The companion opens that path once (`O_NOFOLLOW`, `nlink===1`) and never re-resolves it per window. A `/proc/self/fd` miss is `ATTACHMENT_REJECTED` inbound; there is no path fallback. Box paths, hardlinks, and other Bots' dirs are rejected. Caps: 2 MiB generic, 5 MiB image, enforced on the first Codex window before buffering. Inbound MIME sniffing uses the outbound allowlist.
+- Outbound confirmation binds bot ID, name, MIME, size, sha256, path identity, and roster fingerprint via a preview token and shows the full resolved path. Credential/config locations are denied under `$HOME`, `os.homedir()`, and the passwd home, including the default and redirected `codex-grok-mcp` trees, `$CODEX_HOME`, `$GROK_HOME`, and `gateway.json`/`config/` under every candidate Sand root (`$SAND_DATA_ROOT`, `$SAND_USER_DATA_DIR/{sand-data,agent-data}`, default, and legacy). Symlinks, hardlinks, and path tricks are rejected. An existing bind mount that exposes a denied tree, or part of one, at another path is not detected. Test flags do not skip these checks; tests pass fixture homes and fixture Sand roots as an internal argument that adds to the defaults. Only that fixture-root guard keeps the fixed default/legacy Sand roots and the passwd home trees path-only; production with no guard full-pins them even when the hermetic flag is set.
+- New errors: `ATTACHMENT_REJECTED`, `ATTACHMENT_TOO_LARGE`, `ATTACHMENT_STALE`, `ATTACHMENT_INTEGRITY`.
+
+## Later upstream asks
+
+Drafted here only; no external filing.
+
+- A host discard/delete RPC for committed attachments.
+- An attachment capability string in `BASE_HOST_CAPABILITIES` / `getHostStatus.capabilities`.
+- Server-side validation of `sendPrompt.attachment_paths` (existence, cardinality with `attachment_names`, and confinement to the target Bot's attachments directory).
+
+## Unverified (blocked on an approved live probe)
+
+- Server acceptance of a committed path (`{accepted:true}` is still acceptance-only).
+- Whether the Bot turn actually sees the file.
+- HTTP error shapes for Sand attachment errors.
+- Inbound transcript shape for Temporal-hosted Bots.
+
+---
+
+Earlier static research (2026-09-04) follows. Live contract verification of the host remains blocked until the probe above is approved. Keep [issue #11](https://github.com/Fato07/codex-grok-mcp/issues/11) open.
 
 ## Evidence pins
 
