@@ -64,6 +64,21 @@ function isDefaultSandPath(value) {
   return text.startsWith("/home/box/sand-data") || text.startsWith("/home/box/agent-data");
 }
 
+function applyOverlay(st) {
+  if (st == null) return st;
+  const overlays = globalThis.CODEX_GROK_FULL_PIN_OVERLAYS ?? [];
+  const hit = overlays.find((entry) => entry.from.dev === st.dev && entry.from.ino === st.ino);
+  if (hit === undefined) return st;
+  return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
+    dev: hit.to.dev,
+    ino: hit.to.ino,
+    nlink: 1,
+    isFile: () => hit.to.file === true,
+    isDirectory: () => hit.to.file === false,
+    isSymbolicLink: () => false,
+  });
+}
+
 function wrap(target, name) {
   const original = target[name];
   if (typeof original !== "function") return;
@@ -83,7 +98,9 @@ function wrap(target, name) {
       err.code = "ENOENT";
       throw err;
     }
-    return original.apply(this, args);
+    const result = original.apply(this, args);
+    if (name === "lstatSync" || name === "statSync") return applyOverlay(result);
+    return result;
   };
 }
 
@@ -110,16 +127,5 @@ if (originalRealpathNative !== undefined) {
 
 const originalFstat = fs.fstatSync.bind(fs);
 fs.fstatSync = function wrappedFstat(fd, options) {
-  const st = originalFstat(fd, options);
-  const overlays = globalThis.CODEX_GROK_FULL_PIN_OVERLAYS ?? [];
-  const hit = overlays.find((entry) => entry.from.dev === st.dev && entry.from.ino === st.ino);
-  if (hit === undefined) return st;
-  return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
-    dev: hit.to.dev,
-    ino: hit.to.ino,
-    nlink: 1,
-    isFile: () => hit.to.file === true,
-    isDirectory: () => hit.to.file === false,
-    isSymbolicLink: () => false,
-  });
+  return applyOverlay(originalFstat(fd, options));
 };

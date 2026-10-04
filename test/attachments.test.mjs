@@ -1756,10 +1756,8 @@ import {
 } from ${JSON.stringify(join(repo, "dist/grok-bot-client.js"))};
 import { AttachmentError, validateLocalAttachmentFile } from ${JSON.stringify(join(repo, "dist/attachments.js"))};
 
+const home = process.env.HOME;
 const tmp = process.env.TMPDIR;
-const home = join(tmp, process.env.CODEX_GROK_TEST_HERMETIC === "1" ? "pin-home-on" : "pin-home-off");
-mkdirSync(home, { recursive: true, mode: 0o700 });
-process.env.HOME = home;
 const env = { HOME: home, SAND_DATA_ROOT: process.env.SAND_DATA_ROOT };
 const grokDir = join(home, ".grok");
 mkdirSync(grokDir, { recursive: true, mode: 0o700 });
@@ -1839,17 +1837,19 @@ assert.throws(
 );
 `,
   );
-  for (const hermetic of ["0", "1"]) {
-    const env = { ...process.env };
+  for (const hermeticFlag of ["0", "1"]) {
+    const pinHome = join(hermetic.base, `pin-home-${hermeticFlag}`);
+    await mkdir(pinHome, { recursive: true, mode: 0o700 });
+    const env = { ...process.env, HOME: pinHome };
     delete env.NODE_OPTIONS;
-    if (hermetic === "1") env.CODEX_GROK_TEST_HERMETIC = "1";
+    if (hermeticFlag === "1") env.CODEX_GROK_TEST_HERMETIC = "1";
     else delete env.CODEX_GROK_TEST_HERMETIC;
     const traced = spawnSync(process.execPath, ["--require", preload, script], {
       encoding: "utf8",
       env,
       timeout: 15_000,
     });
-    assert.equal(traced.status, 0, `hermetic=${hermetic}\n${traced.stdout}\n${traced.stderr}`);
+    assert.equal(traced.status, 0, `hermetic=${hermeticFlag}\n${traced.stdout}\n${traced.stderr}`);
   }
 });
 

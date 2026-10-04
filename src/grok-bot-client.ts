@@ -233,7 +233,7 @@ export function isLexicalGrokBotDataRootPath(path: string): boolean {
   return false;
 }
 
-export function testRealDataRootGuardActive(): boolean {
+function testRealDataRootGuardActive(): boolean {
   return process.env.CODEX_GROK_TEST_HERMETIC === "1";
 }
 
