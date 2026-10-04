@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`0.2.0-beta.9` is the supported release. It is a public prerelease; stable `0.2.0` is not published. Security fixes target the current source revision and the next prerelease.
+`0.2.0-beta.10` is the supported release. It is a public prerelease; stable `0.2.0` is not published. Security fixes target the current source revision and the next prerelease.
 
 ## Trust boundary
 
