@@ -1,6 +1,6 @@
 # Testing
 
-Automated tests are hermetic. `npm test` and `npm run test:all` load `test/hermetic-setup.mjs` before any test file. That setup deletes every `SAND_*` and `GROKBOT_*` variable, creates a mode-`0700` fixture base, and sets `SAND_DATA_ROOT` and `TMPDIR` inside it. An in-process attachment account-home setter points the outbound deny list at that fixture so tests never stat real credential paths. The fixture base is removed at process exit (best effort). Cleanup never follows a symlink: if the base path has been replaced by a link, only that link is removed.
+Automated tests are hermetic. `npm test` and `npm run test:all` load `test/hermetic-setup.mjs` before any test file. That setup deletes every `SAND_*` and `GROKBOT_*` variable, creates a mode-`0700` fixture base, and sets `SAND_DATA_ROOT` and `TMPDIR` inside it. Attachment tests pass fixture homes as an internal function argument so production never reads a test hook or env override. The fixture base is removed at process exit (best effort). Cleanup never follows a symlink: if the base path has been replaced by a link, only that link is removed.
 
 The real-root guard arms only when `CODEX_GROK_TEST_HERMETIC` is set. With it unset, `grokBotDataRoot` matches production for every `SAND_DATA_ROOT` value. `managedChildEnvironment` forwards that one test flag only when the parent has it. A managed child that inherits the flag then enforces the same realpath guard and fails before any read or connect if discovery would resolve to the real default Grok Bot data root.
 
@@ -28,6 +28,8 @@ Linux-only tests skip on macOS. The Linux total must equal macOS pass + skip. Cu
 - readAttachment is only called with a path taken from a fresh transcript entry
 - symlink swap after a successful confined open does not leak on later windows
 - parent-directory swap after a confined open is ATTACHMENT_REJECTED
+
+A case-insensitive-filesystem test skips at runtime when `Aa` and `aa` are distinct inodes. That skip is not Linux-only.
 
 ## Sandbox caveat
 

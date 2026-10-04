@@ -14,29 +14,42 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultBridgeConfigPath } from "./bridge-pairing.js";
-import { defaultReplayRoot } from "./bridge-replay.js";
 import { TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
 
-const ATTACHMENT_TEST_HOOKS = Symbol.for("codex-grok-attachment-test-hooks");
-
-type AttachmentTestHooks = {
+export type AttachmentPathGuard = {
+  homes?: readonly string[];
   resolveOpenedFd?: (fd: number) => string;
-  accountHomes?: readonly string[];
 };
 
-function attachmentTestHooks(): AttachmentTestHooks | undefined {
-  const hooks = (globalThis as Record<PropertyKey, unknown>)[ATTACHMENT_TEST_HOOKS];
-  return typeof hooks === "object" && hooks !== null ? (hooks as AttachmentTestHooks) : undefined;
+function foldPath(path: string): string {
+  return process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
 }
 
-function resolveOpenedFdPath(fd: number): string | undefined {
-  const override = attachmentTestHooks()?.resolveOpenedFd;
-  if (override !== undefined) {
+function pathsEqual(left: string, right: string): boolean {
+  return foldPath(left) === foldPath(right);
+}
+
+function pathIsUnder(path: string, root: string): boolean {
+  const left = foldPath(path);
+  const right = foldPath(root);
+  return left === right || left.startsWith(`${right}${sep}`);
+}
+
+function nativeRealpath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    return realpathSync(path);
+  }
+}
+
+function resolveOpenedFdPath(fd: number, resolveOpenedFd?: (fd: number) => string): string | undefined {
+  if (resolveOpenedFd !== undefined) {
     try {
-      return override(fd);
+      return resolveOpenedFd(fd);
     } catch (caught) {
       if (caught instanceof TestRealDataRootError) throw caught;
       return undefined;
@@ -205,23 +218,43 @@ function pinResolvedFdPath(resolved: string, expected: Stats): string {
   return resolved;
 }
 
-function inboundResolvedFdPath(fd: number, expected: Stats): string {
-  const resolved = resolveOpenedFdPath(fd);
+function inboundResolvedFdPath(
+  fd: number,
+  expected: Stats,
+  resolveOpenedFd?: (fd: number) => string,
+): string {
+  const resolved = resolveOpenedFdPath(fd, resolveOpenedFd);
   if (resolved === undefined) fail("ATTACHMENT_REJECTED");
-  return pinResolvedFdPath(resolved, expected);
+  return pinResolvedFdPath(canonicalizeOpenedPath(resolved, expected), expected);
 }
 
-function outboundResolvedFdPath(fd: number, fallback: string, expected: Stats): string {
-  const opened = resolveOpenedFdPath(fd);
-  if (opened !== undefined) return pinResolvedFdPath(opened, expected);
+function outboundResolvedFdPath(
+  fd: number,
+  fallback: string,
+  expected: Stats,
+  resolveOpenedFd?: (fd: number) => string,
+): string {
+  const opened = resolveOpenedFdPath(fd, resolveOpenedFd);
+  if (opened !== undefined) return pinResolvedFdPath(canonicalizeOpenedPath(opened, expected), expected);
   let resolved: string;
   try {
-    resolved = realpathSync(fallback);
+    resolved = nativeRealpath(fallback);
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
     fail("ATTACHMENT_REJECTED");
   }
-  return pinResolvedFdPath(resolved, expected);
+  return pinResolvedFdPath(canonicalizeOpenedPath(resolved, expected), expected);
+}
+
+function canonicalizeOpenedPath(path: string, expected: Stats): string {
+  try {
+    const native = nativeRealpath(path);
+    return pinResolvedFdPath(native, expected);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    if (caught instanceof AttachmentError) throw caught;
+    return path;
+  }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -429,35 +462,26 @@ function assertRegularFile(path: string): Stats {
   return details;
 }
 
-function defaultCompanionLifecycleRoot(
-  environment: NodeJS.ProcessEnv = process.env,
-  home = homedir(),
-): string {
-  const configuredRoot = environment.XDG_DATA_HOME;
-  const root =
-    configuredRoot !== undefined && configuredRoot !== "" && isAbsolute(configuredRoot)
-      ? configuredRoot
-      : join(home, ".local", "share");
-  return join(root, "codex-grok-mcp", "companion");
-}
-
-function accountHomes(environment: NodeJS.ProcessEnv, home: string): string[] {
+function accountHomes(
+  environment: NodeJS.ProcessEnv,
+  home: string,
+  extraHomes?: readonly string[],
+): string[] {
   const homes = new Set<string>();
   const add = (value: string | undefined): void => {
     if (typeof value !== "string" || value.trim() === "") return;
     const resolved = resolve(value);
     homes.add(resolved);
     try {
-      homes.add(realpathSync(resolved));
+      homes.add(nativeRealpath(resolved));
     } catch (caught) {
       if (caught instanceof TestRealDataRootError) throw caught;
     }
   };
   add(home);
   add(environment.HOME);
-  const override = attachmentTestHooks()?.accountHomes;
-  if (override !== undefined) {
-    for (const extra of override) add(extra);
+  if (extraHomes !== undefined) {
+    for (const extra of extraHomes) add(extra);
     return [...homes];
   }
   add(homedir());
@@ -469,32 +493,62 @@ function accountHomes(environment: NodeJS.ProcessEnv, home: string): string[] {
   return [...homes];
 }
 
+function absoluteEnvPath(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  const value = environment[name]?.trim();
+  return value !== undefined && value !== "" && isAbsolute(value) ? value : undefined;
+}
+
+function connectorTree(root: string): string {
+  return join(root, "codex-grok-mcp");
+}
+
 function deniedAttachmentLocations(
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
+  extraHomes?: readonly string[],
 ): { prefixes: string[]; files: string[] } {
   const prefixes: string[] = [];
   const files: string[] = [];
+  const remember = (target: string[], value: string): void => {
+    const resolved = resolve(value);
+    target.push(resolved);
+    try {
+      const real = nativeRealpath(resolved);
+      if (real !== resolved) target.push(real);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+    }
+  };
   const addPrefix = (value: string): void => {
-    prefixes.push(resolve(value));
+    remember(prefixes, value);
   };
   const addFile = (value: string): void => {
-    files.push(resolve(value));
+    remember(files, value);
   };
-  for (const candidate of accountHomes(environment, home)) {
+  for (const candidate of accountHomes(environment, home, extraHomes)) {
     addPrefix(join(candidate, ".grok"));
     addPrefix(join(candidate, ".codex"));
     addPrefix(join(candidate, ".ssh"));
     addFile(join(candidate, ".grok", "auth.json"));
     addFile(join(candidate, ".codex", "auth.json"));
-    const pairing = defaultBridgeConfigPath(environment, candidate);
-    addFile(pairing);
-    addFile(`${pairing}.lifecycle.json`);
-    addPrefix(dirname(pairing));
-    addPrefix(defaultCompanionLifecycleRoot(environment, candidate));
-    addPrefix(defaultReplayRoot(environment, candidate));
-    addPrefix(defaultAttachmentStagingRoot(environment, candidate));
+    addPrefix(connectorTree(join(candidate, ".config")));
+    addPrefix(connectorTree(join(candidate, ".local", "share")));
+    addPrefix(connectorTree(join(candidate, ".local", "state")));
+    addFile(join(candidate, ".config", "codex-grok-mcp", "bridge.json"));
+    addFile(join(candidate, ".config", "codex-grok-mcp", "bridge.json.lifecycle.json"));
   }
+  const xdgConfig = absoluteEnvPath(environment, "XDG_CONFIG_HOME");
+  if (xdgConfig !== undefined) {
+    addPrefix(connectorTree(xdgConfig));
+    addFile(join(xdgConfig, "codex-grok-mcp", "bridge.json"));
+    addFile(join(xdgConfig, "codex-grok-mcp", "bridge.json.lifecycle.json"));
+  }
+  const xdgData = absoluteEnvPath(environment, "XDG_DATA_HOME");
+  if (xdgData !== undefined) addPrefix(connectorTree(xdgData));
+  const xdgState = absoluteEnvPath(environment, "XDG_STATE_HOME");
+  if (xdgState !== undefined) addPrefix(connectorTree(xdgState));
+  const stagingRoot = absoluteEnvPath(environment, "CODEX_GROK_ATTACHMENT_STAGING_ROOT");
+  if (stagingRoot !== undefined) addPrefix(stagingRoot);
   const configuredAuth = environment.GROK_MCP_AUTH_PATH?.trim();
   if (configuredAuth !== undefined && configuredAuth !== "") {
     addFile(isAbsolute(configuredAuth) ? configuredAuth : resolve(configuredAuth));
@@ -514,20 +568,21 @@ export function assertNotSensitiveAttachmentSource(
   stats: Stats,
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
+  extraHomes?: readonly string[],
 ): void {
-  const { prefixes, files } = deniedAttachmentLocations(environment, home);
+  const { prefixes, files } = deniedAttachmentLocations(environment, home, extraHomes);
   const resolved = resolve(resolvedPath);
   for (const prefix of prefixes) {
-    if (resolved === prefix || resolved.startsWith(`${prefix}${sep}`)) fail("ATTACHMENT_REJECTED");
+    if (pathIsUnder(resolved, prefix)) fail("ATTACHMENT_REJECTED");
   }
   const identities = new Set<string>();
   for (const file of files) {
-    if (resolved === file) fail("ATTACHMENT_REJECTED");
+    if (pathsEqual(resolved, file)) fail("ATTACHMENT_REJECTED");
     try {
       const details = lstatSync(file);
       identities.add(`${details.dev}:${details.ino}`);
       if (details.isSymbolicLink() === false) continue;
-      const real = realpathSync(file);
+      const real = nativeRealpath(file);
       const realDetails = lstatSync(real);
       identities.add(`${realDetails.dev}:${realDetails.ino}`);
     } catch (caught) {
@@ -542,6 +597,7 @@ export function validateLocalAttachmentFile(
   displayName?: string,
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
+  guard?: AttachmentPathGuard,
 ): LocalAttachmentDecision {
   if (typeof path !== "string" || path.trim() === "" || isAbsolute(path) === false) {
     fail("ATTACHMENT_REJECTED");
@@ -564,8 +620,8 @@ export function validateLocalAttachmentFile(
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size !== initial.size) fail("ATTACHMENT_REJECTED");
-    const resolvedPath = outboundResolvedFdPath(fd, path, next);
-    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home);
+    const resolvedPath = outboundResolvedFdPath(fd, path, next, guard?.resolveOpenedFd);
+    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home, guard?.homes);
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
     while (offset < bytes.length) {
@@ -631,9 +687,7 @@ export function isUnderBotAttachmentRoots(
     return false;
   }
   const lexical = resolve(path);
-  return botAttachmentRoots(botId, sandRoot).some(
-    (root) => lexical === root || lexical.startsWith(`${root}${sep}`),
-  );
+  return botAttachmentRoots(botId, sandRoot).some((root) => pathIsUnder(lexical, root));
 }
 
 export function assertSafeBotAttachmentPath(path: string, botId: string, sandRoot: string): string {
@@ -657,6 +711,7 @@ export function openConfinedBotAttachment(
   sandRoot: string,
   cap: number,
   displayName?: string,
+  resolveOpenedFd?: (fd: number) => string,
 ): ConfinedAttachmentBytes {
   assertAttachmentBotId(botId);
   if (isUnderBotAttachmentRoots(path, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
@@ -691,7 +746,7 @@ export function openConfinedBotAttachment(
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size > cap) fail("ATTACHMENT_TOO_LARGE");
-    const resolved = inboundResolvedFdPath(fd, next);
+    const resolved = inboundResolvedFdPath(fd, next, resolveOpenedFd);
     if (isUnderBotAttachmentRoots(resolved, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
     const bytes = Buffer.alloc(next.size);
     let offset = 0;

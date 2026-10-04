@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   acceptedContent,
@@ -14,6 +15,7 @@ import {
   ATTACHMENT_IMAGE_MAX_BYTES,
   ATTACHMENT_MAX_BYTES,
   AttachmentError,
+  type AttachmentPathGuard,
   attachmentPreviewToken,
   validateLocalAttachmentFile,
 } from "./attachments.js";
@@ -891,9 +893,14 @@ async function pingBots(
   return receipts;
 }
 
+export type GrokBotToolOptions = {
+  attachmentGuard?: AttachmentPathGuard;
+};
+
 export function registerGrokBotTools(
   server: McpServer,
   transport: GrokBotTransport,
+  options: GrokBotToolOptions = {},
 ): void {
   server.registerTool(
     "grok_list_bots",
@@ -1283,7 +1290,13 @@ export function registerGrokBotTools(
         if (bot === undefined) {
           throw error("BOT_NOT_FOUND", "Bot ID is not present in the current roster. List Bots again.");
         }
-        const file = validateLocalAttachmentFile(input.path, input.name);
+        const file = validateLocalAttachmentFile(
+          input.path,
+          input.name,
+          process.env,
+          homedir(),
+          options.attachmentGuard,
+        );
         const previewToken = attachmentPreviewToken({
           bot_id: bot.id,
           path_identity: file.path_identity,

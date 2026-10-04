@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
@@ -187,15 +189,37 @@ test("documented Grok models match the shared finite tuple", async () => {
 });
 
 test("npm pack excludes attachment test-hooks files", async () => {
-  const { stdout } = await execFileAsync("npm", ["pack", "--dry-run", "--json"], {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-  });
-  const packs = JSON.parse(stdout);
-  const files = packs[0]?.files?.map((entry) => entry.path) ?? [];
-  assert.equal(
-    files.some((path) => path.includes("test-hooks")),
-    false,
-    `published files include test-hooks: ${files.filter((path) => path.includes("test-hooks")).join(", ")}`,
-  );
+  const dest = await mkdtemp(join(tmpdir(), "codex-grok-pack-"));
+  try {
+    const { stdout } = await execFileAsync(
+      "npm",
+      ["pack", "--ignore-scripts", "--json", `--pack-destination=${dest}`],
+      { cwd: new URL("..", import.meta.url), encoding: "utf8" },
+    );
+    const packs = JSON.parse(stdout);
+    const files = packs[0]?.files?.map((entry) => entry.path) ?? [];
+    assert.equal(
+      files.some((path) => path.includes("test-hooks")),
+      false,
+      `published files include test-hooks: ${files.filter((path) => path.includes("test-hooks")).join(", ")}`,
+    );
+    const tarball = join(dest, packs[0].filename);
+    await execFileAsync("tar", ["-xzf", tarball, "-C", dest]);
+    const distDir = join(dest, "package", "dist");
+    const distFiles = await readdir(distDir);
+    const allowedTestEnv = (name) =>
+      name.startsWith("grok-bot-client.") || name.startsWith("bridge-lifecycle.");
+    const hits = [];
+    for (const name of distFiles) {
+      const text = await readFile(join(distDir, name), "utf8");
+      if (text.includes("Symbol.for")) hits.push(`${name}: Symbol.for`);
+      if (text.includes("test-hooks")) hits.push(`${name}: test-hooks`);
+      if (text.includes("CODEX_GROK_TEST_") && allowedTestEnv(name) === false) {
+        hits.push(`${name}: CODEX_GROK_TEST_`);
+      }
+    }
+    assert.deepEqual(hits, []);
+  } finally {
+    await rm(dest, { recursive: true, force: true });
+  }
 });

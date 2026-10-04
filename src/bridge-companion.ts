@@ -126,6 +126,7 @@ export type BridgeRequestContext = {
   stagingRoot?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  resolveOpenedFd?: (fd: number) => string;
 };
 
 export type BridgeProbeResult = {
@@ -503,6 +504,7 @@ async function handleBridgeRequestWithGateway(
             sandRootForAttachments(env),
             fetchSizeCap(located.kind),
             located.name,
+            context.resolveOpenedFd,
           )
         : undefined;
     if (confined !== undefined) {
