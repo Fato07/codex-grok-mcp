@@ -38,7 +38,9 @@ function createFixture() {
   chmodSync(base, 0o700);
   const dataRoot = join(base, "sand-data");
   mkdirSync(dataRoot, { mode: 0o700 });
-  const state = { base, dataRoot };
+  const accountHome = join(base, "home");
+  mkdirSync(accountHome, { mode: 0o700 });
+  const state = { base, dataRoot, accountHome };
   globalThis[STATE] = state;
   process.on("exit", () => removeHermeticFixtureBase(base));
   return state;
@@ -49,7 +51,9 @@ export function applyHermeticEnv(env = process.env) {
   scrubGatewayEnv(env);
   env.SAND_DATA_ROOT = fixture.dataRoot;
   env.TMPDIR = fixture.base;
+  env.HOME = fixture.accountHome;
   env.CODEX_GROK_TEST_HERMETIC = "1";
+  env.CODEX_GROK_TEST_ACCOUNT_HOME = fixture.accountHome;
   return fixture;
 }
 

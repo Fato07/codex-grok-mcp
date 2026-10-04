@@ -16,6 +16,7 @@ import {
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveOpenedFdPath } from "./attachments-test-hooks.js";
 import { defaultBridgeConfigPath } from "./bridge-pairing.js";
 import { defaultReplayRoot } from "./bridge-replay.js";
 import { TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
@@ -37,19 +38,6 @@ export const ATTACHMENT_MAX_FETCH_CACHED = 8;
 export const ATTACHMENT_MAX_FETCH_CACHE_BYTES = 16 * 1024 * 1024;
 export const ATTACHMENT_BOT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const PREVIEW_TOKEN_KEY = randomBytes(32);
-
-export type FdPathResolver = (fd: number, fallback: string) => string;
-
-let fdPathResolver: FdPathResolver | undefined;
-let passwdHomeOverride: string | undefined;
-
-export function setFdPathResolver(resolver?: FdPathResolver): void {
-  fdPathResolver = resolver;
-}
-
-export function setAttachmentPasswdHome(home?: string): void {
-  passwdHomeOverride = home;
-}
 
 export const ATTACHMENT_ERROR_CODES = [
   "ATTACHMENT_REJECTED",
@@ -169,24 +157,7 @@ export function assertAttachmentBotId(botId: string): void {
   if (ATTACHMENT_BOT_ID_PATTERN.test(botId) === false) fail("ATTACHMENT_REJECTED");
 }
 
-function defaultFdPathResolver(fd: number, fallback: string): string {
-  try {
-    return realpathSync(`/proc/self/fd/${String(fd)}`);
-  } catch (caught) {
-    if (caught instanceof TestRealDataRootError) throw caught;
-    return realpathSync(fallback);
-  }
-}
-
-function fdResolvedPath(fd: number, fallback: string, expected: Stats): string {
-  const resolver = fdPathResolver ?? defaultFdPathResolver;
-  let resolved: string;
-  try {
-    resolved = resolver(fd, fallback);
-  } catch (caught) {
-    if (caught instanceof TestRealDataRootError) throw caught;
-    fail("ATTACHMENT_REJECTED");
-  }
+function pinResolvedFdPath(resolved: string, expected: Stats): string {
   let pathStats: Stats;
   try {
     pathStats = lstatSync(resolved);
@@ -203,6 +174,25 @@ function fdResolvedPath(fd: number, fallback: string, expected: Stats): string {
     fail("ATTACHMENT_REJECTED");
   }
   return resolved;
+}
+
+function inboundResolvedFdPath(fd: number, expected: Stats): string {
+  const resolved = resolveOpenedFdPath(fd);
+  if (resolved === undefined) fail("ATTACHMENT_REJECTED");
+  return pinResolvedFdPath(resolved, expected);
+}
+
+function outboundResolvedFdPath(fd: number, fallback: string, expected: Stats): string {
+  const opened = resolveOpenedFdPath(fd);
+  if (opened !== undefined) return pinResolvedFdPath(opened, expected);
+  let resolved: string;
+  try {
+    resolved = realpathSync(fallback);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    fail("ATTACHMENT_REJECTED");
+  }
+  return pinResolvedFdPath(resolved, expected);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -436,15 +426,17 @@ function accountHomes(environment: NodeJS.ProcessEnv, home: string): string[] {
   };
   add(home);
   add(environment.HOME);
+  const hermetic =
+    environment.CODEX_GROK_TEST_HERMETIC === "1" || process.env.CODEX_GROK_TEST_HERMETIC === "1";
+  if (hermetic) {
+    add(environment.CODEX_GROK_TEST_ACCOUNT_HOME ?? process.env.CODEX_GROK_TEST_ACCOUNT_HOME);
+    return [...homes];
+  }
   add(homedir());
-  if (passwdHomeOverride !== undefined) {
-    add(passwdHomeOverride);
-  } else {
-    try {
-      add(userInfo().homedir);
-    } catch (caught) {
-      if (caught instanceof TestRealDataRootError) throw caught;
-    }
+  try {
+    add(userInfo().homedir);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
   }
   return [...homes];
 }
@@ -544,7 +536,7 @@ export function validateLocalAttachmentFile(
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size !== initial.size) fail("ATTACHMENT_REJECTED");
-    const resolvedPath = fdResolvedPath(fd, path, next);
+    const resolvedPath = outboundResolvedFdPath(fd, path, next);
     assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home);
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
@@ -671,7 +663,7 @@ export function openConfinedBotAttachment(
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size > cap) fail("ATTACHMENT_TOO_LARGE");
-    const resolved = fdResolvedPath(fd, path, next);
+    const resolved = inboundResolvedFdPath(fd, next);
     if (isUnderBotAttachmentRoots(resolved, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
@@ -849,7 +841,12 @@ export class AttachmentSessionStore {
 
   lookupFetch(botId: string, entryId: string): FetchCacheRecord | undefined {
     this.sweep();
-    return this.#fetches.get(`${botId}:${entryId}`);
+    const key = `${botId}:${entryId}`;
+    const record = this.#fetches.get(key);
+    if (record === undefined) return undefined;
+    this.#fetches.delete(key);
+    this.#fetches.set(key, record);
+    return record;
   }
 
   #fetchCacheBytes(): number {

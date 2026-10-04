@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { realpathSync, rmSync, symlinkSync } from "node:fs";
+import { realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,10 +24,9 @@ import {
   isUnderBotAttachmentRoots,
   openConfinedBotAttachment,
   resetAttachmentSessionStore,
-  setAttachmentPasswdHome,
-  setFdPathResolver,
   validateLocalAttachmentFile,
 } from "../dist/attachments.js";
+import { setOpenedFdResolver } from "../dist/attachments-test-hooks.js";
 import { handleBridgeRequest } from "../dist/bridge-companion.js";
 import {
   decryptFrame,
@@ -1396,35 +1395,89 @@ test("tool fetch returns one verified image and never treats a window as the who
   }
 });
 
-test("fallback fd path resolver rejects a swap between open and resolve", async (context) => {
-  const secret = join(hermetic.base, "b5-secret.txt");
-  await writeFile(secret, "FIXTURE_SECRET");
-  const path = await writeBotAttachment(BOT, "b5.txt", "SAFE_BYTES");
-  setFdPathResolver((_fd, fallback) => {
-    rmSync(fallback);
-    symlinkSync(secret, fallback);
-    return realpathSync(fallback);
+test("inbound open without /proc/self/fd is ATTACHMENT_REJECTED", async () => {
+  const path = await writeBotAttachment(BOT, "noproc.txt", "SAFE_BYTES");
+  setOpenedFdResolver(() => {
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
   });
-  context.after(() => setFdPathResolver());
-  assert.throws(
-    () => openConfinedBotAttachment(path, BOT, hermetic.dataRoot, ATTACHMENT_MAX_BYTES, "b5.txt"),
-    (caught) => {
-      assert(caught instanceof AttachmentError);
-      assert.equal(caught.code, "ATTACHMENT_REJECTED");
-      return true;
-    },
-  );
-  const stagingRoot = await fixtureDir(context, "att-b5-fetch");
-  const result = await handleBridgeRequest(
-    mockClient({
-      transcript: [{ id: "b5", kind: "user-attachment", file_path: path, file_name: "b5.txt", seq: 1 }],
-    }),
-    request("attachment_fetch", { bot_id: BOT, entry_id: "b5", offset: 0, length: 16 }),
-    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
-  );
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "ATTACHMENT_REJECTED");
-  assert.equal(JSON.stringify(result).includes("FIXTURE_SECRET"), false);
+  try {
+    assert.throws(
+      () => openConfinedBotAttachment(path, BOT, hermetic.dataRoot, ATTACHMENT_MAX_BYTES, "noproc.txt"),
+      (caught) => {
+        assert(caught instanceof AttachmentError);
+        assert.equal(caught.code, "ATTACHMENT_REJECTED");
+        return true;
+      },
+    );
+  } finally {
+    setOpenedFdResolver();
+  }
+});
+
+test("inbound parent-directory swap with no /proc does not leak", async (context) => {
+  const attachments = join(hermetic.dataRoot, "agents", BOT, "attachments");
+  const path = await writeBotAttachment(BOT, "inside.txt", "SAFE_BYTES");
+  const outside = join(hermetic.base, "b5-parent-outside");
+  await mkdir(outside, { recursive: true, mode: 0o700 });
+  await writeFile(join(outside, "inside.txt"), "FIXTURE_SECRET");
+  setOpenedFdResolver(() => {
+    const moved = `${attachments}.real`;
+    rmSync(moved, { recursive: true, force: true });
+    renameSync(attachments, moved);
+    symlinkSync(outside, attachments);
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  });
+  try {
+    assert.throws(
+      () => openConfinedBotAttachment(path, BOT, hermetic.dataRoot, ATTACHMENT_MAX_BYTES, "inside.txt"),
+      (caught) => {
+        assert(caught instanceof AttachmentError);
+        assert.equal(caught.code, "ATTACHMENT_REJECTED");
+        assert.equal(String(caught.message).includes("FIXTURE_SECRET"), false);
+        return true;
+      },
+    );
+    const stagingRoot = await fixtureDir(context, "att-b5-parent");
+    const result = await handleBridgeRequest(
+      mockClient({
+        transcript: [{ id: "inside", kind: "user-attachment", file_path: path, file_name: "inside.txt", seq: 1 }],
+      }),
+      request("attachment_fetch", { bot_id: BOT, entry_id: "inside", offset: 0, length: 16 }),
+      { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "ATTACHMENT_REJECTED");
+    assert.equal(JSON.stringify(result).includes("FIXTURE_SECRET"), false);
+  } finally {
+    setOpenedFdResolver();
+    rmSync(attachments, { recursive: true, force: true });
+    rmSync(`${attachments}.real`, { recursive: true, force: true });
+  }
+});
+
+test("parent-directory swap after a confined open is ATTACHMENT_REJECTED", async () => {
+  const attachments = join(hermetic.dataRoot, "agents", BOT, "attachments");
+  rmSync(attachments, { recursive: true, force: true });
+  const path = await writeBotAttachment(BOT, "keep.txt", "SAFE_BYTES");
+  const first = openConfinedBotAttachment(path, BOT, hermetic.dataRoot, ATTACHMENT_MAX_BYTES, "keep.txt");
+  assert.equal(first.bytes.toString("utf8"), "SAFE_BYTES");
+  const outside = join(hermetic.base, "b5-parent-after");
+  await mkdir(outside, { recursive: true, mode: 0o700 });
+  await writeFile(join(outside, "keep.txt"), "FIXTURE_SECRET");
+  rmSync(attachments, { recursive: true, force: true });
+  symlinkSync(outside, attachments);
+  try {
+    assert.throws(
+      () => openConfinedBotAttachment(path, BOT, hermetic.dataRoot, ATTACHMENT_MAX_BYTES, "keep.txt"),
+      (caught) => {
+        assert(caught instanceof AttachmentError);
+        assert.equal(caught.code, "ATTACHMENT_REJECTED");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(attachments, { recursive: true, force: true });
+  }
 });
 
 test("outbound denies account-home credentials when HOME is spoofed", async (context) => {
@@ -1435,17 +1488,21 @@ test("outbound denies account-home credentials when HOME is spoofed", async (con
   const auth = join(accountHome, ".grok", "auth.json");
   await writeFile(auth, '{"token":"nope"}', { mode: 0o600 });
   const previousHome = process.env.HOME;
+  const previousAccount = process.env.CODEX_GROK_TEST_ACCOUNT_HOME;
   process.env.HOME = spoofHome;
-  setAttachmentPasswdHome(accountHome);
+  process.env.CODEX_GROK_TEST_ACCOUNT_HOME = accountHome;
   context.after(() => {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
-    setAttachmentPasswdHome();
+    if (previousAccount === undefined) delete process.env.CODEX_GROK_TEST_ACCOUNT_HOME;
+    else process.env.CODEX_GROK_TEST_ACCOUNT_HOME = previousAccount;
   });
   assert.throws(
     () =>
       validateLocalAttachmentFile(auth, "auth.json", {
         HOME: spoofHome,
+        CODEX_GROK_TEST_HERMETIC: "1",
+        CODEX_GROK_TEST_ACCOUNT_HOME: accountHome,
         SAND_DATA_ROOT: hermetic.dataRoot,
       }, spoofHome),
     (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
