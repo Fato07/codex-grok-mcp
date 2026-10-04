@@ -1,4 +1,11 @@
-import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +14,20 @@ const STATE = Symbol.for("codex-grok-hermetic-setup");
 export function scrubGatewayEnv(env = process.env) {
   for (const name of Object.keys(env)) {
     if (name.startsWith("SAND_") || name.startsWith("GROKBOT_")) delete env[name];
+  }
+}
+
+export function removeHermeticFixtureBase(base) {
+  try {
+    const details = lstatSync(base);
+    if (details.isSymbolicLink()) {
+      unlinkSync(base);
+      return;
+    }
+    if (!details.isDirectory()) return;
+    rmSync(base, { recursive: true, force: true });
+  } catch {
+    // Best effort: never follow a replaced base, and never fail the process.
   }
 }
 
@@ -19,6 +40,7 @@ function createFixture() {
   mkdirSync(dataRoot, { mode: 0o700 });
   const state = { base, dataRoot };
   globalThis[STATE] = state;
+  process.on("exit", () => removeHermeticFixtureBase(base));
   return state;
 }
 

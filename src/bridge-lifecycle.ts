@@ -117,7 +117,16 @@ export type LifecycleResult = {
   pairing_valid: boolean;
 };
 
-type ProcessResult = { stdout: string };
+type ProcessResult = { stdout: string; stderr: string };
+
+class ChildProcessFailure extends Error {
+  readonly stderr: string;
+
+  constructor(message: string, stderr: string) {
+    super(message);
+    this.stderr = stderr;
+  }
+}
 
 type RemovalSnapshot = {
   path: string;
@@ -152,12 +161,15 @@ export type LifecycleOptions = {
 };
 
 export type BridgeLifecycleErrorReason =
+  | "DATA_ROOT_SYMLINK"
+  | "GATEWAY_ENV_MISMATCH"
   | "RELEASE_TREE_FOREIGN_OWNED"
   | "RELEASE_TREE_GROUP_WRITABLE"
   | "RELEASE_TREE_SPECIAL_BITS"
   | "RELEASE_TREE_SYMLINK"
   | "RELEASE_TREE_UNEXPECTED_MODE"
-  | "RELEASE_TREE_WORLD_WRITABLE";
+  | "RELEASE_TREE_WORLD_WRITABLE"
+  | "TEST_REAL_DATA_ROOT";
 
 export class BridgeLifecycleError extends Error {
   readonly code:
@@ -967,6 +979,7 @@ export async function migrateReleaseTreePermissions(
   const statDir = inspection.lstat ?? lstat;
   const uidOf = inspection.uid ?? currentUid;
 
+  const accepted: { dir: string; details: Awaited<ReturnType<typeof lstat>> }[] = [];
   for (const dir of [releasesRoot, versionDir, releaseDir]) {
     let details;
     try {
@@ -983,10 +996,13 @@ export async function migrateReleaseTreePermissions(
     if ((mode & 0o7000) !== 0) fail("candidate_invalid", "RELEASE_TREE_SPECIAL_BITS");
     if (mode === 0o700) continue;
     if (mode !== 0o755) rejectReleaseTreeMode(mode);
+    accepted.push({ dir, details });
+  }
 
-    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
-    const directoryOnly =
-      typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  const directoryOnly =
+    typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
+  for (const { dir, details } of accepted) {
     const handle = await open(dir, fsConstants.O_RDONLY | noFollow | directoryOnly);
     try {
       const opened = await handle.stat();
@@ -1078,17 +1094,19 @@ async function runProcess(
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    const stderrText = (): string => Buffer.concat(stderr).toString("utf8");
     const finish = (caught?: Error): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (caught === undefined) {
-        resolvePromise({ stdout: Buffer.concat(stdout).toString("utf8") });
+        resolvePromise({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: stderrText() });
       } else {
-        rejectPromise(caught);
+        rejectPromise(new ChildProcessFailure(caught.message, stderrText()));
       }
     };
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -1105,7 +1123,9 @@ async function runProcess(
       if (stderrBytes > MAX_CHILD_OUTPUT_BYTES) {
         child.kill("SIGTERM");
         finish(new Error("child_output_limit"));
+        return;
       }
+      stderr.push(chunk);
     });
     child.once("error", (caught) => finish(caught));
     child.once("close", (code, signal) => {
@@ -1660,7 +1680,10 @@ export async function preflightLifecycleRelease(
       }),
       timeoutMs: START_TIMEOUT_MS,
     },
-  ).catch(() => fail("candidate_invalid"));
+  ).catch((caught: unknown) => {
+    const stderr = caught instanceof ChildProcessFailure ? caught.stderr : "";
+    fail("candidate_invalid", allowlistedChildReason(stderr));
+  });
   let value: unknown;
   try {
     value = JSON.parse(result.stdout);
@@ -1673,6 +1696,28 @@ export async function preflightLifecycleRelease(
     JSON.stringify(parsed.protocol_versions) !== JSON.stringify(release.protocol_versions)
   ) {
     fail("candidate_invalid");
+  }
+}
+
+const ALLOWLISTED_CHILD_REASONS = new Set<BridgeLifecycleErrorReason>([
+  "DATA_ROOT_SYMLINK",
+  "GATEWAY_ENV_MISMATCH",
+  "TEST_REAL_DATA_ROOT",
+]);
+
+function allowlistedChildReason(stderr: string): BridgeLifecycleErrorReason | undefined {
+  const line = stderr.split("\n").find((entry) => entry.trim().startsWith("{"));
+  if (line === undefined || line.length > 512) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    if (typeof parsed !== "object" || parsed === null || !("reason" in parsed)) return undefined;
+    const reason = (parsed as { reason?: unknown }).reason;
+    if (typeof reason !== "string" || !ALLOWLISTED_CHILD_REASONS.has(reason as BridgeLifecycleErrorReason)) {
+      return undefined;
+    }
+    return reason as BridgeLifecycleErrorReason;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1701,6 +1746,10 @@ export function managedChildEnvironment(extra: NodeJS.ProcessEnv): NodeJS.Proces
   const sandUserDataDirectory = process.env.SAND_USER_DATA_DIR;
   if (sandUserDataDirectory !== undefined && sandUserDataDirectory.trim() !== "") {
     environment.SAND_USER_DATA_DIR = resolve(sandUserDataDirectory);
+  }
+  const hermeticFlag = process.env.CODEX_GROK_TEST_HERMETIC;
+  if (hermeticFlag !== undefined) {
+    environment.CODEX_GROK_TEST_HERMETIC = hermeticFlag;
   }
   return { ...environment, ...extra };
 }
