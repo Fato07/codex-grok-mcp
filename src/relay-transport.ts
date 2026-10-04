@@ -27,6 +27,7 @@ const remoteErrorMessages: Record<BridgeErrorCode, string> = {
   CANCELLED: "Grok Bot companion request was cancelled.",
   CONFIG_INVALID: "Grok Bot companion configuration is invalid.",
   GATEWAY_REJECTED: "Grok Bot gateway rejected the companion request.",
+  GATEWAY_VERIFICATION_FAILED: "Grok Bot gateway could not be verified by the companion.",
   INVALID_RESPONSE: "Grok Bot companion returned an invalid response.",
   OUTPUT_LIMIT: "Grok Bot companion response exceeded its safety limit.",
   RATE_LIMITED: "Grok Bot gateway rate limit was reached.",

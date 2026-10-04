@@ -102,6 +102,7 @@ export type LocalGatewayErrorCode =
   | "AUTH_FAILED"
   | "CONFIG_INVALID"
   | "GATEWAY_REJECTED"
+  | "GATEWAY_VERIFICATION_FAILED"
   | "INVALID_RESPONSE"
   | "OUTPUT_LIMIT"
   | "RATE_LIMITED"
@@ -279,8 +280,7 @@ function linuxPidOwnsListeningPort(
     const processStartedAt = linuxProcessStartEpochMs(pid);
     if (
       processStartedAt === undefined ||
-      descriptorStartedAt > Date.now() + 5_000 ||
-      processStartedAt > descriptorStartedAt + 5_000
+      descriptorStartedAt > Date.now() + 5_000
     ) {
       return false;
     }
@@ -616,7 +616,7 @@ export class LocalGrokBotClient {
         gateway.startedAt,
       )
     ) {
-      throw new LocalGatewayError("CONFIG_INVALID", 0, requestId);
+      throw new LocalGatewayError("GATEWAY_VERIFICATION_FAILED", 0, requestId);
     }
   }
 }
