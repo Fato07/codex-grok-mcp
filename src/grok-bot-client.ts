@@ -126,7 +126,24 @@ type ClientOptions = {
   verifyServer?: (pid: number, port: number, host: string, startedAt: number) => boolean;
 };
 
-export type LocalGatewayErrorReason = "DATA_ROOT_SYMLINK" | "GATEWAY_ENV_MISMATCH";
+export type LocalGatewayErrorReason =
+  | "DATA_ROOT_SYMLINK"
+  | "GATEWAY_ENV_MISMATCH"
+  | "TEST_REAL_DATA_ROOT";
+
+export const TEST_REAL_DATA_ROOT_MESSAGE =
+  "test data root resolved to the real Grok Bot data root";
+
+export class TestRealDataRootError extends Error {
+  readonly reason = "TEST_REAL_DATA_ROOT" as const;
+
+  constructor() {
+    super(TEST_REAL_DATA_ROOT_MESSAGE);
+    this.name = "TestRealDataRootError";
+    process.exitCode = 1;
+    process.stderr.write(`${TEST_REAL_DATA_ROOT_MESSAGE}\n`);
+  }
+}
 
 export class LocalGatewayError extends Error {
   readonly code: LocalGatewayErrorCode;
@@ -190,18 +207,30 @@ function realGrokBotDataRoots(): string[] {
   return [...roots];
 }
 
-export function assertNotRealGrokBotDataRoot(root: string): void {
-  if (process.env.CODEX_GROK_TEST_HERMETIC !== "1") return;
-  const resolved = existingRealpath(root) ?? resolve(root);
+function isRealGrokBotDataRoot(resolved: string): boolean {
   for (const forbidden of realGrokBotDataRoots()) {
     if (
       resolved === forbidden ||
       resolved === `${forbidden}${sep}` ||
       resolved.startsWith(`${forbidden}${sep}`)
     ) {
-      throw new Error("test data root resolved to the real Grok Bot data root");
+      return true;
     }
   }
+  return false;
+}
+
+function testRealDataRootGuardActive(): boolean {
+  if (process.env.CODEX_GROK_TEST_HERMETIC === "1") return true;
+  const fixture = process.env.SAND_DATA_ROOT;
+  if (fixture === undefined || !isAbsolute(fixture)) return false;
+  return !isRealGrokBotDataRoot(existingRealpath(fixture) ?? resolve(fixture));
+}
+
+export function assertNotRealGrokBotDataRoot(root: string): void {
+  if (!testRealDataRootGuardActive()) return;
+  const resolved = existingRealpath(root) ?? resolve(root);
+  if (isRealGrokBotDataRoot(resolved)) throw new TestRealDataRootError();
 }
 
 export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -642,6 +671,7 @@ export class LocalGrokBotClient {
       this.#assertGatewayCurrent(gateway, requestId);
       return validated.data;
     } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
       if (caught instanceof LocalGatewayError) throw caught;
       throw new LocalGatewayError(
         controller.signal.aborted ? "TIMEOUT" : "UNAVAILABLE",
@@ -657,6 +687,7 @@ export class LocalGrokBotClient {
     try {
       return resolveGateway(this.#gatewayOptions);
     } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
       throw new LocalGatewayError(
         "CONFIG_INVALID",
         0,

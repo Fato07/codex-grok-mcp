@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
   LocalGatewayError,
   LocalGrokBotClient,
+  TestRealDataRootError,
 } from "../dist/grok-bot-client.js";
 
 async function writeSecureDiscovery(path, descriptor) {
@@ -232,14 +233,16 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
   assert.throws(
     () =>
       new LocalGrokBotClient({
+        discoveryPath,
         env: {
-          GROKBOT_GATEWAY_URL: "http://gateway.example.test:1340",
+          GROKBOT_GATEWAY_URL: "http://gateway.example.test:9",
           SAND_GATEWAY_TOKEN: token,
         },
         verifyServer: () => true,
       }),
     (caught) => {
       assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "CONFIG_INVALID");
       assert(!caught.message.includes(token));
       return true;
     },
@@ -554,4 +557,21 @@ test("env port or bind host that disagrees with gateway.json is a named mismatch
       return true;
     },
   );
+});
+
+test("client aimed at the real default data root fails with the guard error", () => {
+  const previous = process.exitCode;
+  try {
+    assert.throws(
+      () => new LocalGrokBotClient({ env: {}, verifyServer: () => true }),
+      (caught) => {
+        assert(caught instanceof TestRealDataRootError);
+        assert.equal(caught.message, "test data root resolved to the real Grok Bot data root");
+        assert.notEqual(caught.name, "LocalGatewayError");
+        return true;
+      },
+    );
+  } finally {
+    process.exitCode = previous;
+  }
 });

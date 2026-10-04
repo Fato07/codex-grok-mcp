@@ -9,6 +9,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   readlink,
@@ -18,12 +19,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
   applyHermeticEnv,
   hermetic,
+  removeHermeticFixtureBase,
   scrubGatewayEnv,
 } from "./hermetic-setup.mjs";
 import {
@@ -38,7 +40,9 @@ import {
 import {
   DEFAULT_GROK_BOT_DATA_ROOT,
   grokBotDataRoot,
+  TestRealDataRootError,
 } from "../dist/grok-bot-client.js";
+import { runBridgeCompanion } from "../dist/bridge-companion.js";
 import {
   generatePairCode,
   loadPairingConfigSnapshot,
@@ -56,6 +60,14 @@ import {
   waitForCompanionStop,
 } from "../dist/bridge-runtime.js";
 import { CODEX_GROK_VERSION } from "../dist/version.js";
+
+function assertHermeticManagedChildRoot() {
+  const child = managedChildEnvironment({
+    CODEX_GROK_MANAGED_CONFIG_PATH: "/tmp/codex-grok-managed.json",
+  });
+  assert.equal(child.SAND_DATA_ROOT, hermetic.dataRoot);
+  assert.equal(child.SAND_DATA_ROOT.startsWith(hermetic.base), true);
+}
 
 function release(version, byte) {
   return {
@@ -113,6 +125,7 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
   const actions = [];
   const controls = {
     failPreflight: undefined,
+    failCurrentRelease: undefined,
     failStart: undefined,
     mutatePairingDuringPreflight: false,
     mutatePairingDuringStart: false,
@@ -126,6 +139,9 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
     },
     setFailPreflight(code, version) {
       controls.failPreflight = { code, version };
+    },
+    setFailCurrentRelease(code) {
+      controls.failCurrentRelease = code;
     },
     setOwnsResult(value) {
       controls.ownsResult = value;
@@ -141,7 +157,12 @@ function harness(root, configPath = join(root, "config", "bridge.json")) {
     },
   };
   const hooks = {
-    currentRelease: async () => ({ ...current, protocol_versions: [...current.protocol_versions] }),
+    currentRelease: async () => {
+      if (controls.failCurrentRelease !== undefined) {
+        throw new BridgeLifecycleError(controls.failCurrentRelease);
+      }
+      return { ...current, protocol_versions: [...current.protocol_versions] };
+    },
     pairingIdentity: async () => Buffer.from(pairing),
     preflight: async (candidate) => {
       actions.push(`preflight:${candidate.version}`);
@@ -1156,6 +1177,73 @@ test("version_conflict from stale fails before any action", async (context) => {
   await assertBindingsAbsent(root, configPath);
 });
 
+async function snapshotStaleSurface(root, configPath, dirs, status) {
+  const detailsOf = async (path) => {
+    const details = await lstat(path);
+    return {
+      mode: details.mode & 0o7777,
+      uid: details.uid,
+      symlink: details.isSymbolicLink(),
+      nlink: details.nlink,
+    };
+  };
+  return {
+    state: await readFile(join(root, "state.json"), "utf8"),
+    names: (await readdir(root)).sort(),
+    modes: Object.fromEntries(
+      await Promise.all(dirs.map(async (dir) => [dir, await detailsOf(dir)])),
+    ),
+    status: structuredClone(status),
+    configBinding: await lstat(`${configPath}.lifecycle.json`)
+      .then(() => "present")
+      .catch(() => "absent"),
+    rootBinding: await lstat(join(root, "binding.json"))
+      .then(() => "present")
+      .catch(() => "absent"),
+  };
+}
+
+test("update from stale is a no-op when target staging fails", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-stage-fail-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "config", "bridge.json");
+  const retained = release("0.2.0-beta.6", 2);
+  const { lifecycle, controls, actions } = await stalePreBinding(root, configPath, retained);
+  const releasesRoot = join(root, "releases");
+  const versionDir = join(releasesRoot, retained.version);
+  const releaseDir = join(
+    versionDir,
+    Buffer.from(retained.integrity.slice("sha512-".length), "base64").toString("base64url"),
+  );
+  await mkdir(releaseDir, { recursive: true, mode: 0o700 });
+  await chmod(releasesRoot, 0o700);
+  await chmod(versionDir, 0o700);
+  await chmod(releaseDir, 0o700);
+  const staleStatus = {
+    state: "stale",
+    managed: true,
+    companionVersion: retained.version,
+    protocolVersions: [...retained.protocol_versions],
+    releaseIntegrity: retained.integrity,
+  };
+  controls.setStatus(staleStatus);
+  controls.setCurrent(release("0.2.0-beta.7", 3));
+  controls.setFailCurrentRelease("install_failed");
+  const before = await snapshotStaleSurface(
+    root,
+    configPath,
+    [root, releasesRoot, versionDir, releaseDir],
+    staleStatus,
+  );
+
+  await assert.rejects(lifecycle.run("update"), { message: "install_failed" });
+  assert.deepEqual(actions, []);
+  assert.deepEqual(
+    await snapshotStaleSurface(root, configPath, [root, releasesRoot, versionDir, releaseDir], staleStatus),
+    before,
+  );
+});
+
 test("update never clears a foreign active lease", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-foreign-lease-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -1710,26 +1798,32 @@ test("staging installs the currently invoked package bytes without a registry pa
 
 async function npmRegistryReachable() {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2_000);
-    timer.unref();
-    await fetch("https://registry.npmjs.org/zod", {
+    const response = await fetch("https://registry.npmjs.org/", {
       method: "HEAD",
-      signal: controller.signal,
-      redirect: "manual",
+      redirect: "error",
+      signal: AbortSignal.timeout(8_000),
     });
-    clearTimeout(timer);
-    return true;
+    return response.ok;
   } catch {
     return false;
   }
 }
 
+function registryProbeEnabled() {
+  return (
+    (process.env.CI !== undefined && process.env.CI !== "") ||
+    process.env.CODEX_GROK_TEST_REGISTRY === "1"
+  );
+}
+
 test("staging preserves the published non-development dependency closure", async (context) => {
-  if (!(await npmRegistryReachable())) {
+  if (!registryProbeEnabled()) {
     return context.skip(
-      "registry unreachable; a real install with no registry access waits ~120 s, then fails with install_failed",
+      "registry probe skipped; set CI or CODEX_GROK_TEST_REGISTRY=1 to run the live shrinkwrap closure test",
     );
+  }
+  if (!(await npmRegistryReachable())) {
+    throw new Error("registry unreachable in CI; shrinkwrap closure test cannot skip");
   }
   const lifecycleRoot = await mkdtemp(join(tmpdir(), "codex-grok-stage-closure-"));
   context.after(() => rm(lifecycleRoot, { recursive: true, force: true }));
@@ -1883,6 +1977,7 @@ async function createFixtureRelease(root, version, byte) {
 
 test("Linux kills a candidate that acquires its lease then emits malformed readiness", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
+  assertHermeticManagedChildRoot();
   const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-failure-linux-"));
   const root = join(sandbox, "lifecycle");
   const configPath = join(sandbox, "config", "bridge.json");
@@ -1993,6 +2088,7 @@ setInterval(() => {}, 1_000);
 
 test("Linux lifecycle recovers a stale pre-binding process and completes upgrade and removal", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
+  assertHermeticManagedChildRoot();
   const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-linux-"));
   const root = join(sandbox, "lifecycle");
   const dataRoot = join(sandbox, "sand-data");
@@ -2215,6 +2311,7 @@ setInterval(() => {}, 1_000);
 
 test("Linux lifecycle update from stale never preflights the retained release", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
+  assertHermeticManagedChildRoot();
   const sandbox = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-linux-update-"));
   const root = join(sandbox, "lifecycle");
   const dataRoot = join(sandbox, "sand-data");
@@ -2434,6 +2531,8 @@ async function assertReleaseTreeRejected(root, testRelease, dirs, reason, inspec
   const after = await Promise.all(dirs.map((dir) => lstat(dir)));
   for (const [index, details] of after.entries()) {
     assert.equal(details.mode & 0o7777, before[index].mode & 0o7777);
+    assert.equal(details.uid, before[index].uid);
+    assert.equal(details.isSymbolicLink(), before[index].isSymbolicLink());
   }
 }
 
@@ -2450,8 +2549,8 @@ test("release tree migration: 0700 is left alone and only 0755 is migrated", asy
   await rm(sandbox, { recursive: true, force: true });
 });
 
-test("release tree migration: unexpected modes 0750 and 0711 are rejected", async () => {
-  for (const mode of [0o750, 0o711]) {
+test("release tree migration: unexpected modes 0750, 0711, and 0705 are rejected", async () => {
+  for (const mode of [0o750, 0o711, 0o705]) {
     const { sandbox, root, testRelease, releasesRoot, versionDir, releaseDir } =
       await releaseTreeFixture(`release-tree-${mode.toString(8)}-`);
     await chmod(releaseDir, mode);
@@ -2488,16 +2587,18 @@ test("release tree migration: symlinked release dir fails", async () => {
 });
 
 test("release tree migration: special bits fail", async () => {
-  const { sandbox, root, testRelease, releasesRoot, versionDir, releaseDir } =
-    await releaseTreeFixture("release-tree-special-");
-  await chmod(releaseDir, 0o4755);
-  await assertReleaseTreeRejected(
-    root,
-    testRelease,
-    [releasesRoot, versionDir, releaseDir],
-    "RELEASE_TREE_SPECIAL_BITS",
-  );
-  await rm(sandbox, { recursive: true, force: true });
+  for (const mode of [0o4755, 0o2755, 0o1755]) {
+    const { sandbox, root, testRelease, releasesRoot, versionDir, releaseDir } =
+      await releaseTreeFixture(`release-tree-special-${mode.toString(8)}-`);
+    await chmod(releaseDir, mode);
+    await assertReleaseTreeRejected(
+      root,
+      testRelease,
+      [releasesRoot, versionDir, releaseDir],
+      "RELEASE_TREE_SPECIAL_BITS",
+    );
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("release tree migration: group-writable fails", async () => {
@@ -2513,20 +2614,38 @@ test("release tree migration: group-writable fails", async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-test("release tree migration: world-writable fails", async () => {
+test("release tree migration: mixed 0755/0755/0775 is rejected without chmod", async () => {
   const { sandbox, root, testRelease, releasesRoot, versionDir, releaseDir } =
-    await releaseTreeFixture("release-tree-world-");
-  await chmod(releaseDir, 0o757);
+    await releaseTreeFixture("release-tree-mixed-775-");
+  await chmod(releasesRoot, 0o755);
+  await chmod(versionDir, 0o755);
+  await chmod(releaseDir, 0o775);
   await assertReleaseTreeRejected(
     root,
     testRelease,
     [releasesRoot, versionDir, releaseDir],
-    "RELEASE_TREE_WORLD_WRITABLE",
+    "RELEASE_TREE_GROUP_WRITABLE",
   );
   await rm(sandbox, { recursive: true, force: true });
 });
 
+test("release tree migration: world-writable fails", async () => {
+  for (const mode of [0o757, 0o777]) {
+    const { sandbox, root, testRelease, releasesRoot, versionDir, releaseDir } =
+      await releaseTreeFixture(`release-tree-world-${mode.toString(8)}-`);
+    await chmod(releaseDir, mode);
+    await assertReleaseTreeRejected(
+      root,
+      testRelease,
+      [releasesRoot, versionDir, releaseDir],
+      "RELEASE_TREE_WORLD_WRITABLE",
+    );
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("hermetic scrub removes inherited gateway env before SAND_DATA_ROOT is set", (context) => {
+  assertHermeticManagedChildRoot();
   context.after(() => applyHermeticEnv());
   process.env.SAND_HOST_PORT = "1340";
   process.env.SAND_GATEWAY_BIND_HOST = "0.0.0.0";
@@ -2573,14 +2692,19 @@ test("production managed child environment still forwards the gateway allowlist"
 });
 
 test("hermetic guard rejects the real Grok Bot data root", () => {
-  assert.throws(
-    () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
-    /real Grok Bot data root/,
-  );
-  assert.throws(
-    () => grokBotDataRoot({ SAND_USER_DATA_DIR: "/home/box" }),
-    /real Grok Bot data root/,
-  );
+  const previous = process.exitCode;
+  try {
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_USER_DATA_DIR: "/home/box" }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
+  } finally {
+    process.exitCode = previous;
+  }
 });
 
 test("box-like inherited env still uses the fixture data root", (context) => {
@@ -2619,4 +2743,176 @@ test("release tree migration: foreign-owned dir is rejected via uid seam", async
     { uid: () => (process.getuid?.() ?? 1000) + 1 },
   );
   await rm(sandbox, { recursive: true, force: true });
+});
+
+test("release tree migration: foreign-owned inner under 0755 parents is rejected without chmod", async () => {
+  const { sandbox, root, testRelease, releasesRoot, versionDir, releaseDir } =
+    await releaseTreeFixture("release-tree-foreign-inner-");
+  await chmod(releasesRoot, 0o755);
+  await chmod(versionDir, 0o755);
+  await chmod(releaseDir, 0o755);
+  await assertReleaseTreeRejected(
+    root,
+    testRelease,
+    [releasesRoot, versionDir, releaseDir],
+    "RELEASE_TREE_FOREIGN_OWNED",
+    {
+      lstat: async (path) => {
+        const details = await lstat(path);
+        if (path === releaseDir) {
+          Object.defineProperty(details, "uid", {
+            value: (process.getuid?.() ?? 1000) + 1,
+          });
+        }
+        return details;
+      },
+    },
+  );
+  await rm(sandbox, { recursive: true, force: true });
+});
+
+const PINNED_MANAGED_CHILD_ALLOWLIST = [
+  "HOME",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "SAND_DATA_ROOT",
+  "GROKBOT_GATEWAY_URL",
+  "SAND_GATEWAY_URL",
+  "SAND_GATEWAY_BIND_HOST",
+  "SAND_HOST_PORT",
+  "SAND_GATEWAY_TOKEN",
+];
+
+function pinnedManagedChildEnvironment(extra) {
+  const environment = {};
+  for (const name of PINNED_MANAGED_CHILD_ALLOWLIST) {
+    const value = process.env[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  const sandUserDataDirectory = process.env.SAND_USER_DATA_DIR;
+  if (sandUserDataDirectory !== undefined && sandUserDataDirectory.trim() !== "") {
+    environment.SAND_USER_DATA_DIR = resolve(sandUserDataDirectory);
+  }
+  return { ...environment, ...extra };
+}
+
+test("managed child environment without the hermetic flag is byte-identical to the pinned allowlist", (context) => {
+  context.after(() => applyHermeticEnv());
+  delete process.env.CODEX_GROK_TEST_HERMETIC;
+  process.env.HOME = process.env.HOME ?? "/tmp";
+  process.env.TMPDIR = hermetic.base;
+  process.env.SAND_DATA_ROOT = hermetic.dataRoot;
+  process.env.SAND_USER_DATA_DIR = hermetic.base;
+  process.env.GROKBOT_GATEWAY_URL = "http://127.0.0.1:9";
+  process.env.SAND_GATEWAY_URL = "http://127.0.0.1:9";
+  process.env.SAND_GATEWAY_BIND_HOST = "127.0.0.1";
+  process.env.SAND_HOST_PORT = "9";
+  process.env.SAND_GATEWAY_TOKEN = "allowlist-token";
+  const extra = { CODEX_GROK_MANAGED_CONFIG_PATH: "managed" };
+  const child = managedChildEnvironment(extra);
+  const pinned = pinnedManagedChildEnvironment(extra);
+  assert.equal(Buffer.from(JSON.stringify(child)).equals(Buffer.from(JSON.stringify(pinned))), true);
+  assert.equal(Object.hasOwn(child, "CODEX_GROK_TEST_HERMETIC"), false);
+  assert.deepEqual(Object.keys(child).sort(), Object.keys(pinned).sort());
+});
+
+test("managed child environment forwards the hermetic flag only when the parent has it", (context) => {
+  context.after(() => applyHermeticEnv());
+  const extra = { CODEX_GROK_MANAGED_CONFIG_PATH: "managed" };
+  process.env.CODEX_GROK_TEST_HERMETIC = "1";
+  const withFlag = managedChildEnvironment(extra);
+  assert.equal(withFlag.CODEX_GROK_TEST_HERMETIC, "1");
+  delete process.env.CODEX_GROK_TEST_HERMETIC;
+  const withoutFlag = managedChildEnvironment(extra);
+  assert.equal(Object.hasOwn(withoutFlag, "CODEX_GROK_TEST_HERMETIC"), false);
+});
+
+test("managed child with hermetic flag and real root fails before any read or connect", async () => {
+  const previous = process.exitCode;
+  const extra = { CODEX_GROK_MANAGED_CONFIG_PATH: "/tmp/codex-grok-managed.json" };
+  const childEnv = managedChildEnvironment(extra);
+  assert.equal(childEnv.CODEX_GROK_TEST_HERMETIC, "1");
+  childEnv.SAND_DATA_ROOT = DEFAULT_GROK_BOT_DATA_ROOT;
+  const clientUrl = pathToFileURL(join(process.cwd(), "dist", "grok-bot-client.js")).href;
+  const source = `
+    import { LocalGrokBotClient } from ${JSON.stringify(clientUrl)};
+    let readOrConnect = false;
+    try {
+      new LocalGrokBotClient({
+        env: process.env,
+        fetch: async () => {
+          readOrConnect = true;
+          throw new Error("fetch");
+        },
+        verifyServer: () => {
+          readOrConnect = true;
+          return false;
+        },
+      });
+      process.stdout.write(JSON.stringify({ ok: true, readOrConnect }) + "\\n");
+    } catch (caught) {
+      process.stdout.write(
+        JSON.stringify({
+          name: caught?.name,
+          reason: caught?.reason,
+          message: caught?.message,
+          readOrConnect,
+        }) + "\\n",
+      );
+      process.exitCode = 1;
+    }
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    env: { PATH: process.env.PATH, ...childEnv },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", (chunk) => stdout.push(chunk));
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  const [code] = await once(child, "exit");
+  process.exitCode = previous;
+  const result = JSON.parse(Buffer.concat(stdout).toString("utf8"));
+  assert.equal(code, 1);
+  assert.equal(result.name, "TestRealDataRootError");
+  assert.equal(result.reason, "TEST_REAL_DATA_ROOT");
+  assert.equal(result.readOrConnect, false);
+  assert.match(Buffer.concat(stderr).toString("utf8"), /test data root resolved to the real Grok Bot data root/);
+});
+
+test("hermetic fixture cleanup never follows a replaced base symlink", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-hermetic-rm-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const decoy = join(parent, "decoy");
+  await mkdir(decoy, { mode: 0o700 });
+  const keep = join(decoy, "keep");
+  await writeFile(keep, "keep\n", { mode: 0o600 });
+  const base = join(parent, "codex-grok-hermetic-link");
+  await symlink(decoy, base);
+  removeHermeticFixtureBase(base);
+  await assert.rejects(lstat(base), { code: "ENOENT" });
+  assert.equal(await readFile(keep, "utf8"), "keep\n");
+});
+
+test("hermetic setup removes its fixture base on process exit", async () => {
+  const setupUrl = pathToFileURL(join(process.cwd(), "test", "hermetic-setup.mjs")).href;
+  const source = `
+    import { hermetic } from ${JSON.stringify(setupUrl)};
+    process.stdout.write(hermetic.base + "\\n");
+  `;
+  const childEnv = { ...process.env };
+  delete childEnv.CODEX_GROK_TEST_HERMETIC;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    env: childEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout = [];
+  child.stdout.on("data", (chunk) => stdout.push(chunk));
+  const [code] = await once(child, "exit");
+  assert.equal(code, 0);
+  const base = Buffer.concat(stdout).toString("utf8").trim();
+  assert.match(base, /codex-grok-hermetic-/);
+  await assert.rejects(lstat(base), { code: "ENOENT" });
 });

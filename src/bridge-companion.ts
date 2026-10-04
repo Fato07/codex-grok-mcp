@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   LocalGatewayError,
   LocalGrokBotClient,
+  TestRealDataRootError,
   type LocalAgentSummary,
   type LocalGatewayDiscovery,
   type LocalGatewayHealth,
@@ -783,11 +784,15 @@ export async function runBridgeCompanion(
         ? caught.code
         : caught instanceof BridgeRuntimeError
         ? caught.code
+        : caught instanceof TestRealDataRootError
+          ? "CONFIG_INVALID"
         : caught instanceof LocalGatewayError
           ? caught.code
           : `${command ?? "bridge"}_failed`;
     const reason =
-      caught instanceof LocalGatewayError && caught.reason !== undefined
+      caught instanceof TestRealDataRootError
+        ? caught.reason
+        : caught instanceof LocalGatewayError && caught.reason !== undefined
         ? caught.reason
         : caught instanceof BridgeLifecycleError && caught.reason !== undefined
           ? caught.reason

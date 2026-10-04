@@ -16,7 +16,11 @@ All notable changes will be documented here. This project follows [Semantic Vers
 - End-to-end encrypted paired transport with bounded reads, exact-ID sends, replay protection, strict local gateway validation, and no automatic retry after an uncertain write.
 - Pairing-preserving lifecycle cutovers with candidate preflight, private state, exact process identity, and fail-closed stale recovery.
 - Paired config/root ownership records, persisted protected data roots, maintenance-lease uninstall exclusion, and hard-link lease claims that prevent stale cleanup from displacing a new owner.
-- `update` and `rollback` to a different release preflight only the target; release-tree migration is limited to the exact legacy `0755` shape; tests never resolve the real Grok Bot data root.
+- `update` and `rollback` to a different release preflight only the target and publish bindings only after start, unchanged pairing, and an explicit ownership check on every cutover; release-tree migration is limited to the exact legacy `0755` shape and rejects mixed trees without chmod; tests never resolve the real Grok Bot data root.
+
+### Changed
+
+- A failed target stage or other failure before the switch during `update` or `rollback` from stale is a no-op. The stale lease, bindings, and release tree stay as they were; no child is started; the original staging or preflight error is returned unchanged. Earlier builds restarted the retained release when staging failed.
 
 ### Verified boundaries
 

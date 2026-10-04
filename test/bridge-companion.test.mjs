@@ -24,6 +24,7 @@ import { CODEX_GROK_VERSION } from "../dist/version.js";
 import {
   LocalGatewayError,
   LocalGrokBotClient,
+  TestRealDataRootError,
 } from "../dist/grok-bot-client.js";
 
 test("probe emits only allowlisted metadata and sanitizes failures", async () => {
@@ -152,6 +153,47 @@ test("probe names a symlinked SAND_DATA_ROOT without leaking paths", async (cont
   assert.equal(stdout, "");
   assert.equal(stderr, '{"error":"CONFIG_INVALID","reason":"DATA_ROOT_SYMLINK"}\n');
   assert(!stderr.includes(sandbox));
+});
+
+test("companion probe names GATEWAY_ENV_MISMATCH", async () => {
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await runBridgeCompanion(["probe"], {
+    createClient: () => {
+      throw new LocalGatewayError(
+        "CONFIG_INVALID",
+        0,
+        "",
+        "GATEWAY_ENV_MISMATCH",
+        "SAND_HOST_PORT does not match gateway.json",
+      );
+    },
+    stdout: { write: (chunk) => (stdout += chunk) },
+    stderr: { write: (chunk) => (stderr += chunk) },
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(stdout, "");
+  assert.equal(stderr, '{"error":"CONFIG_INVALID","reason":"GATEWAY_ENV_MISMATCH"}\n');
+});
+
+test("companion names TEST_REAL_DATA_ROOT without wrapping it as a generic failure", async () => {
+  const previous = process.exitCode;
+  try {
+    let stdout = "";
+    let stderr = "";
+    const exitCode = await runBridgeCompanion(["probe"], {
+      createClient: () => {
+        throw new TestRealDataRootError();
+      },
+      stdout: { write: (chunk) => (stdout += chunk) },
+      stderr: { write: (chunk) => (stderr += chunk) },
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(stdout, "");
+    assert.equal(stderr, '{"error":"CONFIG_INVALID","reason":"TEST_REAL_DATA_ROOT"}\n');
+  } finally {
+    process.exitCode = previous;
+  }
 });
 
 test("lifecycle errors pass a release-tree reason through the companion", async () => {
