@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   closeSync,
@@ -13,7 +13,7 @@ import {
   writeSync,
   type Stats,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultBridgeConfigPath } from "./bridge-pairing.js";
@@ -33,7 +33,23 @@ export const ATTACHMENT_NAME_MAX_BYTES = 255;
 export const ATTACHMENT_CHUNK_B64_MAX = 87_384;
 export const ATTACHMENT_MAX_STAGED_UPLOADS = 8;
 export const ATTACHMENT_MAX_STAGED_BYTES = 16 * 1024 * 1024;
+export const ATTACHMENT_MAX_FETCH_CACHED = 8;
+export const ATTACHMENT_MAX_FETCH_CACHE_BYTES = 16 * 1024 * 1024;
 export const ATTACHMENT_BOT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const PREVIEW_TOKEN_KEY = randomBytes(32);
+
+export type FdPathResolver = (fd: number, fallback: string) => string;
+
+let fdPathResolver: FdPathResolver | undefined;
+let passwdHomeOverride: string | undefined;
+
+export function setFdPathResolver(resolver?: FdPathResolver): void {
+  fdPathResolver = resolver;
+}
+
+export function setAttachmentPasswdHome(home?: string): void {
+  passwdHomeOverride = home;
+}
 
 export const ATTACHMENT_ERROR_CODES = [
   "ATTACHMENT_REJECTED",
@@ -153,13 +169,40 @@ export function assertAttachmentBotId(botId: string): void {
   if (ATTACHMENT_BOT_ID_PATTERN.test(botId) === false) fail("ATTACHMENT_REJECTED");
 }
 
-function fdResolvedPath(fd: number, fallback: string): string {
+function defaultFdPathResolver(fd: number, fallback: string): string {
   try {
     return realpathSync(`/proc/self/fd/${String(fd)}`);
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
     return realpathSync(fallback);
   }
+}
+
+function fdResolvedPath(fd: number, fallback: string, expected: Stats): string {
+  const resolver = fdPathResolver ?? defaultFdPathResolver;
+  let resolved: string;
+  try {
+    resolved = resolver(fd, fallback);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    fail("ATTACHMENT_REJECTED");
+  }
+  let pathStats: Stats;
+  try {
+    pathStats = lstatSync(resolved);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    fail("ATTACHMENT_REJECTED");
+  }
+  if (
+    pathStats.dev !== expected.dev ||
+    pathStats.ino !== expected.ino ||
+    pathStats.isFile() === false ||
+    pathStats.nlink !== 1
+  ) {
+    fail("ATTACHMENT_REJECTED");
+  }
+  return resolved;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -339,8 +382,8 @@ export function attachmentPreviewToken(input: {
   name: string;
   roster_fingerprint: string;
 }): string {
-  return sha256Buffer(
-    Buffer.from(
+  return createHmac("sha256", PREVIEW_TOKEN_KEY)
+    .update(
       [
         input.bot_id,
         input.path_identity,
@@ -351,8 +394,8 @@ export function attachmentPreviewToken(input: {
         input.roster_fingerprint,
       ].join("|"),
       "utf8",
-    ),
-  );
+    )
+    .digest("hex");
 }
 
 function openNoFollow(path: string, flags: number, mode?: number): number {
@@ -379,6 +422,33 @@ function defaultCompanionLifecycleRoot(
   return join(root, "codex-grok-mcp", "companion");
 }
 
+function accountHomes(environment: NodeJS.ProcessEnv, home: string): string[] {
+  const homes = new Set<string>();
+  const add = (value: string | undefined): void => {
+    if (typeof value !== "string" || value.trim() === "") return;
+    const resolved = resolve(value);
+    homes.add(resolved);
+    try {
+      homes.add(realpathSync(resolved));
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+    }
+  };
+  add(home);
+  add(environment.HOME);
+  add(homedir());
+  if (passwdHomeOverride !== undefined) {
+    add(passwdHomeOverride);
+  } else {
+    try {
+      add(userInfo().homedir);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+    }
+  }
+  return [...homes];
+}
+
 function deniedAttachmentLocations(
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
@@ -391,25 +461,24 @@ function deniedAttachmentLocations(
   const addFile = (value: string): void => {
     files.push(resolve(value));
   };
-  addPrefix(join(home, ".grok"));
-  addPrefix(join(home, ".codex"));
-  addPrefix(join(home, ".ssh"));
+  for (const candidate of accountHomes(environment, home)) {
+    addPrefix(join(candidate, ".grok"));
+    addPrefix(join(candidate, ".codex"));
+    addPrefix(join(candidate, ".ssh"));
+    addFile(join(candidate, ".grok", "auth.json"));
+    addFile(join(candidate, ".codex", "auth.json"));
+    const pairing = defaultBridgeConfigPath(environment, candidate);
+    addFile(pairing);
+    addFile(`${pairing}.lifecycle.json`);
+    addPrefix(dirname(pairing));
+    addPrefix(defaultCompanionLifecycleRoot(environment, candidate));
+    addPrefix(defaultReplayRoot(environment, candidate));
+    addPrefix(defaultAttachmentStagingRoot(environment, candidate));
+  }
   const configuredAuth = environment.GROK_MCP_AUTH_PATH?.trim();
-  addFile(
-    configuredAuth !== undefined && configuredAuth !== ""
-      ? isAbsolute(configuredAuth)
-        ? configuredAuth
-        : resolve(configuredAuth)
-      : join(home, ".grok", "auth.json"),
-  );
-  addFile(join(home, ".codex", "auth.json"));
-  const pairing = defaultBridgeConfigPath(environment, home);
-  addFile(pairing);
-  addFile(`${pairing}.lifecycle.json`);
-  addPrefix(dirname(pairing));
-  addPrefix(defaultCompanionLifecycleRoot(environment, home));
-  addPrefix(defaultReplayRoot(environment, home));
-  addPrefix(defaultAttachmentStagingRoot(environment, home));
+  if (configuredAuth !== undefined && configuredAuth !== "") {
+    addFile(isAbsolute(configuredAuth) ? configuredAuth : resolve(configuredAuth));
+  }
   try {
     const sandRoot = grokBotDataRoot(environment);
     addFile(join(sandRoot, "gateway.json"));
@@ -475,7 +544,7 @@ export function validateLocalAttachmentFile(
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size !== initial.size) fail("ATTACHMENT_REJECTED");
-    const resolvedPath = fdResolvedPath(fd, path);
+    const resolvedPath = fdResolvedPath(fd, path, next);
     assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home);
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
@@ -602,7 +671,7 @@ export function openConfinedBotAttachment(
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size > cap) fail("ATTACHMENT_TOO_LARGE");
-    const resolved = fdResolvedPath(fd, path);
+    const resolved = fdResolvedPath(fd, path, next);
     if (isUnderBotAttachmentRoots(resolved, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
@@ -772,12 +841,32 @@ export class AttachmentSessionStore {
 
   rememberFetch(record: FetchCacheRecord): void {
     this.sweep();
-    this.#fetches.set(`${record.botId}:${record.entryId}`, record);
+    const key = `${record.botId}:${record.entryId}`;
+    this.#fetches.delete(key);
+    this.#fetches.set(key, record);
+    this.#evictFetches();
   }
 
   lookupFetch(botId: string, entryId: string): FetchCacheRecord | undefined {
     this.sweep();
     return this.#fetches.get(`${botId}:${entryId}`);
+  }
+
+  #fetchCacheBytes(): number {
+    let total = 0;
+    for (const record of this.#fetches.values()) total += record.bytes.length;
+    return total;
+  }
+
+  #evictFetches(): void {
+    while (
+      this.#fetches.size > ATTACHMENT_MAX_FETCH_CACHED ||
+      this.#fetchCacheBytes() > ATTACHMENT_MAX_FETCH_CACHE_BYTES
+    ) {
+      const oldest = this.#fetches.keys().next().value;
+      if (oldest === undefined) break;
+      this.#fetches.delete(oldest);
+    }
   }
 
   stage(input: {

@@ -11,6 +11,8 @@ import { z } from "zod";
 import { MAX_PROMPT_BYTES } from "./schema.js";
 import {
   ATTACHMENT_CHUNK_BYTES,
+  ATTACHMENT_IMAGE_MAX_BYTES,
+  ATTACHMENT_MAX_BYTES,
   AttachmentError,
   attachmentPreviewToken,
   validateLocalAttachmentFile,
@@ -639,7 +641,6 @@ export const grokFetchBotAttachmentInputSchema = z
   .object({
     bot_id: botIdSchema,
     entry_id: z.string().trim().min(1).max(512),
-    offset: z.number().int().nonnegative().safe().default(0),
     length: z.number().int().positive().max(ATTACHMENT_CHUNK_BYTES).default(ATTACHMENT_CHUNK_BYTES),
   })
   .strict();
@@ -1435,7 +1436,7 @@ export function registerGrokBotTools(
         openWorldHint: true,
       },
     },
-    async ({ bot_id, entry_id, offset, length }, context) => {
+    async ({ bot_id, entry_id, length }, context) => {
       try {
         if (transport.fetchAttachment === undefined) {
           throw error(
@@ -1469,6 +1470,17 @@ export function registerGrokBotTools(
             digest = fetched.sha256;
             mime = fetched.mime;
             name = fetched.name;
+            const cap =
+              mime === "image/png" || mime === "image/jpeg"
+                ? ATTACHMENT_IMAGE_MAX_BYTES
+                : ATTACHMENT_MAX_BYTES;
+            if (totalSize > cap) {
+              throw error(
+                "ATTACHMENT_TOO_LARGE",
+                "Attachment exceeds the fetch size cap.",
+                { failedStage: "validated" },
+              );
+            }
           } else if (
             fetched.total_size !== totalSize ||
             fetched.sha256 !== digest ||

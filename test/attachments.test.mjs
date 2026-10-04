@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { realpathSync } from "node:fs";
+import { realpathSync, rmSync, symlinkSync } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,7 +22,10 @@ import {
   attachmentPreviewToken,
   expectedCommittedPath,
   isUnderBotAttachmentRoots,
+  openConfinedBotAttachment,
   resetAttachmentSessionStore,
+  setAttachmentPasswdHome,
+  setFdPathResolver,
   validateLocalAttachmentFile,
 } from "../dist/attachments.js";
 import { handleBridgeRequest } from "../dist/bridge-companion.js";
@@ -1388,6 +1391,275 @@ test("tool fetch returns one verified image and never treats a window as the who
     assert.equal(result.content[1].data, body.toString("base64"));
     assert.match(result.content[0].text, /UNTRUSTED EXTERNAL CONTENT/);
     assert.equal(fetches >= 2, true);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("fallback fd path resolver rejects a swap between open and resolve", async (context) => {
+  const secret = join(hermetic.base, "b5-secret.txt");
+  await writeFile(secret, "FIXTURE_SECRET");
+  const path = await writeBotAttachment(BOT, "b5.txt", "SAFE_BYTES");
+  setFdPathResolver((_fd, fallback) => {
+    rmSync(fallback);
+    symlinkSync(secret, fallback);
+    return realpathSync(fallback);
+  });
+  context.after(() => setFdPathResolver());
+  assert.throws(
+    () => openConfinedBotAttachment(path, BOT, hermetic.dataRoot, ATTACHMENT_MAX_BYTES, "b5.txt"),
+    (caught) => {
+      assert(caught instanceof AttachmentError);
+      assert.equal(caught.code, "ATTACHMENT_REJECTED");
+      return true;
+    },
+  );
+  const stagingRoot = await fixtureDir(context, "att-b5-fetch");
+  const result = await handleBridgeRequest(
+    mockClient({
+      transcript: [{ id: "b5", kind: "user-attachment", file_path: path, file_name: "b5.txt", seq: 1 }],
+    }),
+    request("attachment_fetch", { bot_id: BOT, entry_id: "b5", offset: 0, length: 16 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "ATTACHMENT_REJECTED");
+  assert.equal(JSON.stringify(result).includes("FIXTURE_SECRET"), false);
+});
+
+test("outbound denies account-home credentials when HOME is spoofed", async (context) => {
+  const accountHome = join(hermetic.base, "account-home");
+  const spoofHome = join(hermetic.base, "spoof-home");
+  await mkdir(join(accountHome, ".grok"), { recursive: true, mode: 0o700 });
+  await mkdir(spoofHome, { recursive: true, mode: 0o700 });
+  const auth = join(accountHome, ".grok", "auth.json");
+  await writeFile(auth, '{"token":"nope"}', { mode: 0o600 });
+  const previousHome = process.env.HOME;
+  process.env.HOME = spoofHome;
+  setAttachmentPasswdHome(accountHome);
+  context.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    setAttachmentPasswdHome();
+  });
+  assert.throws(
+    () =>
+      validateLocalAttachmentFile(auth, "auth.json", {
+        HOME: spoofHome,
+        SAND_DATA_ROOT: hermetic.dataRoot,
+      }, spoofHome),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+  );
+});
+
+test("tool fetch rejects an oversize companion total_size on the first window", async () => {
+  let fetches = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async fetchAttachment() {
+      fetches += 1;
+      return {
+        bytes_b64: PNG.toString("base64"),
+        total_size: ATTACHMENT_IMAGE_MAX_BYTES + 1,
+        sha256: "a".repeat(64),
+        mime: "image/png",
+        name: "huge.png",
+        truncated: true,
+      };
+    },
+  };
+  const mcp = await openAttachmentMcp(transport);
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_fetch_bot_attachment",
+      arguments: { bot_id: BOT, entry_id: "huge-1" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /ATTACHMENT_TOO_LARGE/);
+    assert.equal(fetches, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("tool fetch rejects windows that disagree", async () => {
+  const body = Buffer.concat([PNG, Buffer.alloc(70_000, 0x41)]);
+  let fetches = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async fetchAttachment({ offset, length }) {
+      fetches += 1;
+      const window = body.subarray(offset, offset + length);
+      return {
+        bytes_b64: window.toString("base64"),
+        total_size: offset === 0 ? body.length : body.length + 1,
+        sha256: sha256(body),
+        mime: "image/png",
+        name: "shot.png",
+        truncated: offset + window.length < body.length,
+      };
+    },
+  };
+  const mcp = await openAttachmentMcp(transport);
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_fetch_bot_attachment",
+      arguments: { bot_id: BOT, entry_id: "disagree-1" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /ATTACHMENT_INTEGRITY/);
+    assert.equal(fetches >= 2, true);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("tool fetch rejects a reassembled hash mismatch", async () => {
+  const body = Buffer.concat([PNG, Buffer.alloc(70_000, 0x41)]);
+  const other = Buffer.concat([PNG, Buffer.alloc(70_000, 0x42)]);
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async fetchAttachment({ offset, length }) {
+      const window = body.subarray(offset, offset + length);
+      return {
+        bytes_b64: window.toString("base64"),
+        total_size: body.length,
+        sha256: sha256(other),
+        mime: "image/png",
+        name: "shot.png",
+        truncated: offset + window.length < body.length,
+      };
+    },
+  };
+  const mcp = await openAttachmentMcp(transport);
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_fetch_bot_attachment",
+      arguments: { bot_id: BOT, entry_id: "hash-1" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /ATTACHMENT_INTEGRITY/);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("tool send surfaces failed_stage=staged", async (context) => {
+  const root = await fixtureDir(context, "att-stage-fail");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async stageAttachment() {
+      throw new GrokBotGatewayError("UNAVAILABLE", "stage failed");
+    },
+    async commitAttachment() {
+      throw new Error("should not commit");
+    },
+  };
+  const previewServer = await openAttachmentMcp(transport);
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_send_bot_attachment",
+    arguments: { bot_id: BOT, path },
+  });
+  await previewServer.close();
+  const mcp = await openAttachmentMcp(transport, { approve: true });
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: preview.structuredContent.preview_token,
+      },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /failed_stage=staged/);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("tool send surfaces failed_stage=committed", async (context) => {
+  const root = await fixtureDir(context, "att-commit-fail");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async stageAttachment() {
+      return { received: 18, total_size: 18, complete: true };
+    },
+    async commitAttachment() {
+      throw new GrokBotGatewayError("ATTACHMENT_INTEGRITY", "commit failed", {
+        commitMayHaveOccurred: true,
+      });
+    },
+  };
+  const previewServer = await openAttachmentMcp(transport);
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_send_bot_attachment",
+    arguments: { bot_id: BOT, path },
+  });
+  await previewServer.close();
+  const mcp = await openAttachmentMcp(transport, { approve: true });
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: preview.structuredContent.preview_token,
+      },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /failed_stage=committed/);
+    assert.match(result.content[0].text, /commit_may_have_occurred/);
   } finally {
     await mcp.close();
   }

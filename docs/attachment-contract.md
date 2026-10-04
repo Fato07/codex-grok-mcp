@@ -6,8 +6,8 @@ The v1 connector contract (Bridge Lead decisions, host pin `f5c783a`):
 
 - Capabilities `attachment_send_v1` and `attachment_read_v1` are advertised only after `getHostStatus.hostVersion` is on the pinned allowlist. Tester override: `CODEX_GROK_ATTACHMENT_HOST_ALLOWLIST_EXTRA` (explicit, logged as unverified host, never default-on).
 - Outbound: one regular file, no symlinks, `O_NOFOLLOW`, ≤2 MiB, extension and magic allowlist, SHA-256, native confirmation, 64 KiB replay-checked relay chunks, private 0700/0600 companion staging with a 15-minute TTL, one `uploadAttachment`, opaque `attachment_ref`, then `send_message` with exactly one ref.
-- Inbound: `read_bot` v4 metadata-only `attachments[]`; `attachment_fetch` re-reads a fresh tail and takes the path from that entry only. The companion opens that path once (`O_NOFOLLOW`, `nlink===1`) and never re-resolves it per window. Box paths, hardlinks, and other Bots' dirs are rejected. Caps: 2 MiB generic, 5 MiB image. Inbound MIME sniffing uses the outbound allowlist.
-- Outbound confirmation binds bot ID, name, MIME, size, sha256, path identity, and roster fingerprint via a preview token and shows the full resolved path. Credential/config locations are denied.
+- Inbound: `read_bot` v4 metadata-only `attachments[]`; `attachment_fetch` re-reads a fresh tail and takes the path from that entry only. The companion opens that path once (`O_NOFOLLOW`, `nlink===1`) and never re-resolves it per window. A `/proc/self/fd` miss falls back to path realpath only when that path's `dev`/`ino` still match the opened fd. Box paths, hardlinks, and other Bots' dirs are rejected. Caps: 2 MiB generic, 5 MiB image, enforced on the first Codex window before buffering. Inbound MIME sniffing uses the outbound allowlist.
+- Outbound confirmation binds bot ID, name, MIME, size, sha256, path identity, and roster fingerprint via a preview token and shows the full resolved path. Credential/config locations are denied under `$HOME`, `os.homedir()`, and the passwd home.
 - New errors: `ATTACHMENT_REJECTED`, `ATTACHMENT_TOO_LARGE`, `ATTACHMENT_STALE`, `ATTACHMENT_INTEGRITY`.
 
 ## Later upstream asks
