@@ -16,12 +16,7 @@ import {
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  GROK_BOT_DATA_ROOTS,
-  TestRealDataRootError,
-  grokBotDataRoot,
-  skipRealGrokBotRootSyscall,
-} from "./grok-bot-client.js";
+import { GROK_BOT_DATA_ROOTS, TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
 
 export type AttachmentPathGuard = {
   homes?: readonly string[];
@@ -519,7 +514,6 @@ function deniedAttachmentLocations(
   const remember = (target: string[], value: string): void => {
     const resolved = resolve(value);
     target.push(resolved);
-    if (skipRealGrokBotRootSyscall(resolved)) return;
     try {
       const real = nativeRealpath(resolved);
       if (real !== resolved) target.push(real);
@@ -579,7 +573,6 @@ function deniedAttachmentLocations(
 }
 
 function pinPathIdentity(path: string, identities: Set<string>, directoriesOnly = false): void {
-  if (skipRealGrokBotRootSyscall(path)) return;
   try {
     const details = lstatSync(path);
     if (directoriesOnly && details.isDirectory() === false && details.isSymbolicLink() === false) {
@@ -617,19 +610,17 @@ function ancestorDirectoryIdentities(
   const directoryFlag = typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0;
   while (seen.has(cursor) === false) {
     seen.add(cursor);
-    if (skipRealGrokBotRootSyscall(cursor) === false) {
+    try {
+      const dirFd = openNoFollow(cursor, fsConstants.O_RDONLY | directoryFlag);
       try {
-        const dirFd = openNoFollow(cursor, fsConstants.O_RDONLY | directoryFlag);
-        try {
-          const details = fstatSync(dirFd);
-          identities.add(`${details.dev}:${details.ino}`);
-        } finally {
-          closeSync(dirFd);
-        }
-      } catch (caught) {
-        if (caught instanceof TestRealDataRootError) throw caught;
-        pinPathIdentity(cursor, identities, true);
+        const details = fstatSync(dirFd);
+        identities.add(`${details.dev}:${details.ino}`);
+      } finally {
+        closeSync(dirFd);
       }
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+      pinPathIdentity(cursor, identities, true);
     }
     const parent = dirname(cursor);
     if (parent === cursor) break;

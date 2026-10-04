@@ -2,7 +2,7 @@
 
 Automated tests are hermetic. `npm test` and `npm run test:all` load `test/hermetic-setup.mjs` before any test file. That setup deletes every `SAND_*` and `GROKBOT_*` variable, creates a mode-`0700` fixture base, and sets `SAND_DATA_ROOT` and `TMPDIR` inside it. Attachment tests pass fixture homes as an internal function argument so production never reads a test hook or env override. The fixture base is removed at process exit (best effort). Cleanup never follows a symlink: if the base path has been replaced by a link, only that link is removed.
 
-The real-root guard arms only when `CODEX_GROK_TEST_HERMETIC` is set. With it unset, `grokBotDataRoot` matches production for every `SAND_DATA_ROOT` value. `managedChildEnvironment` forwards that one test flag only when the parent has it. A managed child that inherits the flag then enforces the same realpath guard and fails before any read or connect if discovery would resolve to the real default Grok Bot data root.
+The real-root guard arms only when `CODEX_GROK_TEST_HERMETIC` is set. It does not skip attachment deny, identity, or ancestor checks. With it unset, `grokBotDataRoot` matches production for every `SAND_DATA_ROOT` value. `managedChildEnvironment` forwards that one test flag only when the parent has it. A managed child that inherits the flag then enforces the same realpath guard and fails before any read or connect if discovery would resolve to the real default Grok Bot data root.
 
 Do not point tests at a live Grok Bot gateway. If a proof run inherits host gateway environment variables, keep the fixture data root and give the process no network path to a real gateway.
 
@@ -28,9 +28,9 @@ Linux-only tests skip on macOS. The Linux total must equal macOS pass + skip. Cu
 - readAttachment is only called with a path taken from a fresh transcript entry
 - symlink swap after a successful confined open does not leak on later windows
 - parent-directory swap after a confined open is ATTACHMENT_REJECTED
-- outbound denies a bind-mounted directory alias of a credential tree
+- outbound ancestor-dev-ino check denies a bind-mounted credential directory
 
-A case-insensitive-filesystem test skips at runtime when `Aa` and `aa` are distinct inodes. That skip is not Linux-only. The bind-mounted directory-alias test is Linux-only and also skips when `mount --bind` is unavailable.
+A case-insensitive-filesystem test skips at runtime when `Aa` and `aa` are distinct inodes. That skip is not Linux-only. The ancestor-dev-ino bind-directory test is Linux-only and also skips when `mount --bind` is unavailable (no elevated privileges in CI). It covers only a whole denied directory whose `dev`/`ino` matches an ancestor; subdirectory binds and rename races are documented residuals.
 
 ## Sandbox caveat
 

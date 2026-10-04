@@ -205,7 +205,6 @@ test("npm pack excludes attachment test-hooks files", async () => {
     const packed = JSON.parse(await readFile(join(repo, "package.json"), "utf8"));
     delete packed.scripts?.prepare;
     delete packed.scripts?.prepublishOnly;
-    packed.files = ["dist", "!dist/**/*test-hooks*"];
     const packedDist = join(pkgDir, "dist");
     await mkdir(packedDist, { recursive: true });
     for (const name of Object.keys(before)) {
@@ -215,6 +214,7 @@ test("npm pack excludes attachment test-hooks files", async () => {
     const { stdout } = await execFileAsync("npm", ["pack", "--json", `--pack-destination=${dest}`], {
       cwd: pkgDir,
       encoding: "utf8",
+      env: { ...process.env, npm_config_update_notifier: "false" },
     });
     const packs = JSON.parse(stdout);
     const files = packs[0]?.files?.map((entry) => entry.path) ?? [];

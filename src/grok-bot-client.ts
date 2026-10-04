@@ -241,15 +241,10 @@ export function isLexicalGrokBotDataRootPath(path: string): boolean {
   return false;
 }
 
-export function skipRealGrokBotRootSyscall(path: string): boolean {
-  return testRealDataRootGuardActive() && isLexicalGrokBotDataRootPath(path);
-}
-
 function realGrokBotDataRoots(): string[] {
   const roots = new Set<string>();
   for (const candidate of GROK_BOT_DATA_ROOTS) {
     roots.add(resolve(candidate));
-    if (skipRealGrokBotRootSyscall(candidate)) continue;
     const real = existingRealpath(candidate);
     if (real !== undefined) roots.add(real);
   }

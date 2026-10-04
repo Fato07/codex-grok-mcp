@@ -1742,7 +1742,9 @@ test("outbound denies a directory whose inode matches a credential tree", async 
   }
 });
 
-test("outbound denies a bind-mounted directory alias of a credential tree", async (context) => {
+// Ancestor-dev/ino only: a whole denied directory bind-mounted elsewhere.
+// Subdirectory binds and same-user rename races are documented residuals.
+test("outbound ancestor-dev-ino check denies a bind-mounted credential directory", async (context) => {
   if (process.platform !== "linux") return context.skip("Linux only");
   const home = join(hermetic.base, "rb1-bind-home");
   const ssh = join(home, ".ssh");
