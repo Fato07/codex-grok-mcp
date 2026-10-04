@@ -213,6 +213,8 @@ npx --yes --package "codex-grok-mcp@${NEXT_VERSION}" -- codex-grok-bridge update
 npx --yes --package "codex-grok-mcp@${NEXT_VERSION}" -- codex-grok-bridge rollback
 ```
 
+`npm exec --yes --package=<tgz> -- codex-grok-bridge update` is equivalent.
+
 The rollback operation uses the retained release, and a repeated rollback is a no-op. Pairing is read and revalidated, never rewritten. For VM resume recovery, a Grok Bot routine may run the exact pinned `ensure` command. Routine creation remains an explicit operator action.
 
 To opt into the mutable beta channel for one update, make the channel visible in that command:

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { constants as fsConstants, realpathSync } from "node:fs";
+import { constants as fsConstants, lstatSync, realpathSync } from "node:fs";
 import {
   chmod,
   link,
@@ -1139,10 +1139,37 @@ async function runProcess(
   });
 }
 
-function npmCommand(args: string[]): { command: string; args: string[] } {
-  const npmExecPath = process.env.npm_execpath;
+const NPM_CLI_NAME = /^npm-cli\.(?:js|cjs|mjs)$/;
+const NPX_CLI_NAME = /^npx-cli\.(?:js|cjs|mjs)$/;
+
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function resolvedNpmCli(npmExecPath: string): string | undefined {
+  const name = basename(npmExecPath);
+  if (NPM_CLI_NAME.test(name)) return npmExecPath;
+  if (NPX_CLI_NAME.test(name)) {
+    const sibling = join(dirname(npmExecPath), name.replace(/^npx-cli/, "npm-cli"));
+    if (isRegularFile(sibling)) return sibling;
+  }
+  return undefined;
+}
+
+export function npmCommand(
+  args: string[],
+  environment: NodeJS.ProcessEnv = process.env,
+): { command: string; args: string[] } {
+  const npmExecPath = environment.npm_execpath;
   if (npmExecPath !== undefined && isAbsolute(npmExecPath)) {
-    return { command: process.execPath, args: [npmExecPath, ...args] };
+    const npmCli = resolvedNpmCli(npmExecPath);
+    if (npmCli !== undefined) {
+      return { command: process.execPath, args: [npmCli, ...args] };
+    }
   }
   return { command: "npm", args };
 }
