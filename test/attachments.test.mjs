@@ -13,6 +13,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -1595,6 +1596,34 @@ test("outbound falls back to path realpath when /proc/self/fd is unavailable", a
   );
   assert.equal(decision.bytes.toString("utf8"), "hello fallback\n");
   assert.equal(decision.resolved_path, realpathSync(safe));
+});
+
+test("hermetic setup isolates XDG pairing trees from the passwd home", () => {
+  const passwd = userInfo().homedir;
+  assert.equal(process.env.XDG_CONFIG_HOME, hermetic.xdgConfigHome);
+  assert.equal(process.env.XDG_DATA_HOME, hermetic.xdgDataHome);
+  assert.equal(process.env.XDG_STATE_HOME, hermetic.xdgStateHome);
+  assert.notEqual(process.env.XDG_CONFIG_HOME, join(passwd, ".config"));
+});
+
+test("hermetic deny list does not syscall the passwd home XDG pairing tree", async () => {
+  const passwd = userInfo().homedir;
+  const safe = await writeText(hermetic.base, "xdg-isolate.txt", "hello attachment\n");
+  const env = {
+    HOME: hermetic.accountHome,
+    SAND_DATA_ROOT: hermetic.dataRoot,
+    XDG_CONFIG_HOME: join(passwd, ".config"),
+    XDG_DATA_HOME: join(passwd, ".local", "share"),
+    XDG_STATE_HOME: join(passwd, ".local", "state"),
+  };
+  const decision = validateLocalAttachmentFile(
+    safe,
+    "note.txt",
+    env,
+    hermetic.accountHome,
+    attachmentGuard(hermetic.accountHome),
+  );
+  assert.equal(decision.bytes.toString("utf8"), "hello attachment\n");
 });
 
 test("outbound denies default connector trees when XDG is redirected", async () => {

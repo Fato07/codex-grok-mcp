@@ -610,14 +610,19 @@ function deniedAttachmentLocations(
   }
   const xdgConfig = absoluteEnvPath(environment, "XDG_CONFIG_HOME");
   if (xdgConfig !== undefined) {
-    addPrefix(connectorTree(xdgConfig));
-    addFile(join(xdgConfig, "codex-grok-mcp", "bridge.json"));
-    addFile(join(xdgConfig, "codex-grok-mcp", "bridge.json.lifecycle.json"));
+    const lexical = lexicalDefaults && isLexicalDefaultHomeRoot(xdgConfig);
+    addPrefix(connectorTree(xdgConfig), lexical);
+    addFile(join(xdgConfig, "codex-grok-mcp", "bridge.json"), lexical);
+    addFile(join(xdgConfig, "codex-grok-mcp", "bridge.json.lifecycle.json"), lexical);
   }
   const xdgData = absoluteEnvPath(environment, "XDG_DATA_HOME");
-  if (xdgData !== undefined) addPrefix(connectorTree(xdgData));
+  if (xdgData !== undefined) {
+    addPrefix(connectorTree(xdgData), lexicalDefaults && isLexicalDefaultHomeRoot(xdgData));
+  }
   const xdgState = absoluteEnvPath(environment, "XDG_STATE_HOME");
-  if (xdgState !== undefined) addPrefix(connectorTree(xdgState));
+  if (xdgState !== undefined) {
+    addPrefix(connectorTree(xdgState), lexicalDefaults && isLexicalDefaultHomeRoot(xdgState));
+  }
   const stagingRoot = absoluteEnvPath(environment, "CODEX_GROK_ATTACHMENT_STAGING_ROOT");
   if (stagingRoot !== undefined) addPrefix(stagingRoot);
   const grokHome = absoluteEnvPath(environment, "GROK_HOME");

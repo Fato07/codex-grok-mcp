@@ -41,11 +41,26 @@ function createFixture() {
   mkdirSync(dataRoot, { mode: 0o700 });
   const accountHome = join(base, "home");
   mkdirSync(accountHome, { mode: 0o700 });
+  const xdgConfigHome = join(accountHome, ".config");
+  const xdgDataHome = join(accountHome, ".local", "share");
+  const xdgStateHome = join(accountHome, ".local", "state");
+  mkdirSync(xdgConfigHome, { mode: 0o700 });
+  mkdirSync(xdgDataHome, { recursive: true, mode: 0o700 });
+  mkdirSync(xdgStateHome, { recursive: true, mode: 0o700 });
   const defaultSandRoot = join(base, "default-sand");
   const legacySandRoot = join(base, "legacy-sand");
   mkdirSync(defaultSandRoot, { mode: 0o700 });
   mkdirSync(legacySandRoot, { mode: 0o700 });
-  const state = { base, dataRoot, accountHome, defaultSandRoot, legacySandRoot };
+  const state = {
+    base,
+    dataRoot,
+    accountHome,
+    xdgConfigHome,
+    xdgDataHome,
+    xdgStateHome,
+    defaultSandRoot,
+    legacySandRoot,
+  };
   globalThis[STATE] = state;
   process.on("exit", () => removeHermeticFixtureBase(base));
   return state;
@@ -57,6 +72,9 @@ export function applyHermeticEnv(env = process.env) {
   env.SAND_DATA_ROOT = fixture.dataRoot;
   env.TMPDIR = fixture.base;
   env.HOME = fixture.accountHome;
+  env.XDG_CONFIG_HOME = fixture.xdgConfigHome;
+  env.XDG_DATA_HOME = fixture.xdgDataHome;
+  env.XDG_STATE_HOME = fixture.xdgStateHome;
   env.CODEX_GROK_TEST_HERMETIC = "1";
   delete env.CODEX_GROK_TEST_ACCOUNT_HOME;
   return fixture;
