@@ -386,7 +386,7 @@ export const bridgeRequestSchema = z.discriminatedUnion("op", [
           sha256: sha256HexSchema,
           seq: z.number().int().nonnegative().safe(),
           offset: z.number().int().nonnegative().safe(),
-          bytes_b64: z.string().min(1).max(96 * 1024),
+          bytes_b64: z.string().min(1).max(87_384),
         })
         .strict(),
     })

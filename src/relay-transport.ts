@@ -48,7 +48,11 @@ const remoteErrorMessages: Record<BridgeErrorCode, string> = {
 function error(
   code: GrokBotGatewayErrorCode,
   message: string,
-  options: { deliveryMayHaveOccurred?: boolean; requestId?: string } = {},
+  options: {
+    deliveryMayHaveOccurred?: boolean;
+    commitMayHaveOccurred?: boolean;
+    requestId?: string;
+  } = {},
 ): GrokBotGatewayError {
   return new GrokBotGatewayError(code, message, options);
 }
@@ -234,6 +238,7 @@ async function requestRelay(
 function remoteError(response: Extract<ReturnType<typeof bridgeResponseSchema.parse>, { ok: false }>): GrokBotGatewayError {
   return error(response.error.code, remoteErrorMessages[response.error.code], {
     deliveryMayHaveOccurred: response.error.delivery_may_have_occurred,
+    commitMayHaveOccurred: response.error.commit_may_have_occurred === true,
     ...(response.error.request_id === undefined ? {} : { requestId: response.error.request_id }),
   });
 }

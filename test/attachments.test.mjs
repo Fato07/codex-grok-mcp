@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import {
+  InMemoryTransport,
+  LATEST_PROTOCOL_VERSION,
+  McpServer,
+} from "@modelcontextprotocol/server";
 import { WebSocketServer } from "ws";
 import { hermetic } from "./hermetic-setup.mjs";
 import {
@@ -12,7 +17,10 @@ import {
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_TTL_MS,
   AttachmentError,
+  assertSafeBotAttachmentPath,
+  attachmentPreviewToken,
   expectedCommittedPath,
+  isUnderBotAttachmentRoots,
   resetAttachmentSessionStore,
   validateLocalAttachmentFile,
 } from "../dist/attachments.js";
@@ -22,7 +30,7 @@ import {
   generatePairCode,
   parsePairCode,
 } from "../dist/bridge-pairing.js";
-import { GrokBotGatewayError } from "../dist/grok-bot-gateway.js";
+import { GrokBotGatewayError, registerGrokBotTools } from "../dist/grok-bot-gateway.js";
 import { LocalGrokBotClient } from "../dist/grok-bot-client.js";
 import { createRelayTransport } from "../dist/relay-transport.js";
 
@@ -107,6 +115,66 @@ async function writeText(dir, name, contents) {
   const path = join(dir, name);
   await writeFile(path, contents);
   return path;
+}
+
+async function writeBotAttachment(botId, name, contents) {
+  const directory = join(hermetic.dataRoot, "agents", botId, "attachments");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, name);
+  await writeFile(path, contents);
+  return path;
+}
+
+async function openAttachmentMcp(transport, { approve = false } = {}) {
+  const mcpServer = new McpServer({ name: "attachment-tool-test", version: "1" });
+  registerGrokBotTools(mcpServer, transport);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const elicitationRequests = [];
+  let nextId = 0;
+  const pending = new Map();
+  clientTransport.onmessage = async (message) => {
+    if ("method" in message) {
+      if (message.method === "elicitation/create" && "id" in message) {
+        elicitationRequests.push(message.params);
+        await clientTransport.send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: approve
+            ? { action: "accept", content: { confirm: true } }
+            : { action: "decline" },
+        });
+      }
+      return;
+    }
+    if (!("id" in message)) return;
+    const resolve = pending.get(message.id);
+    pending.delete(message.id);
+    resolve?.(message);
+  };
+  const request = async (method, params = {}) => {
+    const id = ++nextId;
+    const response = new Promise((resolve) => pending.set(id, resolve));
+    await clientTransport.send({ jsonrpc: "2.0", id, method, params });
+    const message = await response;
+    if ("error" in message) throw new Error(JSON.stringify(message.error));
+    return message.result;
+  };
+  await mcpServer.connect(serverTransport);
+  await clientTransport.start();
+  await request("initialize", {
+    protocolVersion: LATEST_PROTOCOL_VERSION,
+    capabilities: { elicitation: {} },
+    clientInfo: { name: "attachment-test", version: "1" },
+  });
+  await clientTransport.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  return {
+    elicitationRequests,
+    request,
+    async close() {
+      await clientTransport.close();
+      await mcpServer.close();
+    },
+  };
 }
 
 test("path escape .. is rejected and never forwarded to readAttachment", async (context) => {
@@ -266,13 +334,12 @@ test("oversize 2 MiB + 1 is rejected", async (context) => {
 test("oversize 5 MiB image + 1 is rejected", async (context) => {
   const stagingRoot = await fixtureDir(context, "att-oversize-5");
   const path = join(hermetic.dataRoot, "agents", BOT, "attachments", `${"b".repeat(64)}.png`);
+  await mkdir(join(hermetic.dataRoot, "agents", BOT, "attachments"), { recursive: true, mode: 0o700 });
+  const oversized = Buffer.alloc(ATTACHMENT_IMAGE_MAX_BYTES + 1);
+  PNG.copy(oversized);
+  await writeFile(path, oversized);
   const client = mockClient({
     transcript: [{ id: "img-1", kind: "user-attachment", file_path: path, file_name: "shot.png", seq: 1 }],
-    chunk: {
-      bytesBase64: PNG.toString("base64"),
-      totalSize: ATTACHMENT_IMAGE_MAX_BYTES + 1,
-      mime: "image/png",
-    },
   });
   const result = await handleBridgeRequest(
     client,
@@ -281,8 +348,7 @@ test("oversize 5 MiB image + 1 is rejected", async (context) => {
   );
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "ATTACHMENT_TOO_LARGE");
-  assert.equal(client.calls.readAttachmentChunk.length, 1);
-  assert.equal(client.calls.readAttachmentChunk[0].path, path);
+  assert.deepEqual(client.calls.readAttachmentChunk, []);
 });
 
 test("magic and extension mismatch is rejected", async (context) => {
@@ -443,6 +509,22 @@ test("chunk out-of-order is rejected", async (context) => {
   const second = Buffer.from("world\n");
   const uploadId = randomUUID();
   const client = mockClient();
+  const opened = await handleBridgeRequest(
+    client,
+    request("attachment_stage", {
+      upload_id: uploadId,
+      bot_id: BOT,
+      name: "note.txt",
+      mime: "text/plain",
+      total_size: first.length + second.length,
+      sha256: sha256(Buffer.concat([first, second])),
+      seq: 0,
+      offset: 0,
+      bytes_b64: first.toString("base64"),
+    }),
+    { stagingRoot, env },
+  );
+  assert.equal(opened.ok, true);
   const result = await handleBridgeRequest(
     client,
     request("attachment_stage", {
@@ -453,13 +535,13 @@ test("chunk out-of-order is rejected", async (context) => {
       total_size: first.length + second.length,
       sha256: sha256(Buffer.concat([first, second])),
       seq: 1,
-      offset: first.length,
+      offset: 0,
       bytes_b64: second.toString("base64"),
     }),
     { stagingRoot, env },
   );
   assert.equal(result.ok, false);
-  assert.equal(result.error.code, "ATTACHMENT_STALE");
+  assert.equal(result.error.code, "ATTACHMENT_REJECTED");
 });
 
 test("chunk gap is rejected", async (context) => {
@@ -550,6 +632,7 @@ test("TTL expiry cleanup deletes a stale staging upload", async (context) => {
   );
   assert.equal(expired.ok, false);
   assert.equal(expired.error.code, "ATTACHMENT_STALE");
+  await assert.rejects(lstat(join(stagingRoot, uploadId)), { code: "ENOENT" });
 });
 
 test("version gating allows the pinned hostVersion", async (context) => {
@@ -606,10 +689,14 @@ test("version gating override on accepts an extra host and logs unverified host"
   });
   const bytes = Buffer.from("hello attachment\n");
   const writes = [];
-  const { logUnverifiedHostOverride, attachmentHostAllowlist } = await import("../dist/attachments.js");
-  const allow = attachmentHostAllowlist(process.env);
-  logUnverifiedHostOverride(allow.unverifiedExtra, (chunk) => writes.push(chunk));
-  assert.match(writes.join(""), /unverified host/);
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk, encoding, callback) => {
+    writes.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    return originalWrite.call(process.stderr, chunk, encoding, callback);
+  };
+  context.after(() => {
+    process.stderr.write = originalWrite;
+  });
   const result = await handleBridgeRequest(
     mockClient({ hostVersion: "deadbeef" }),
     request("attachment_stage", {
@@ -626,6 +713,7 @@ test("version gating override on accepts an extra host and logs unverified host"
     { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot, [ATTACHMENT_HOST_ALLOWLIST_EXTRA_ENV]: "deadbeef" } },
   );
   assert.equal(result.ok, true);
+  assert.match(writes.join(""), /unverified host/);
 });
 
 test("version gating override off keeps an unknown host closed", async (context) => {
@@ -748,6 +836,8 @@ test("readAttachment is only called with a path taken from a fresh transcript en
   const env = { SAND_DATA_ROOT: hermetic.dataRoot };
   const digest = sha256(PNG);
   const freshPath = expectedCommittedPath(hermetic.dataRoot, BOT, digest, ".png");
+  await mkdir(join(hermetic.dataRoot, "agents", BOT, "attachments"), { recursive: true, mode: 0o700 });
+  await writeFile(freshPath, PNG);
   const client = mockClient({
     transcript: [
       { id: "fresh-1", kind: "user-attachment", file_path: freshPath, file_name: "shot.png", seq: 9 },
@@ -765,10 +855,7 @@ test("readAttachment is only called with a path taken from a fresh transcript en
     { stagingRoot, env },
   );
   assert.equal(result.ok, true);
-  assert.deepEqual(
-    client.calls.readAttachmentChunk.map((call) => call.path),
-    [freshPath],
-  );
+  assert.deepEqual(client.calls.readAttachmentChunk, []);
   assert.equal(result.result.sha256, digest);
 });
 
@@ -878,3 +965,430 @@ test("new LocalGrokBotClient attachment RPCs use an explicit discoveryPath and e
   assert.equal((await client.readAttachmentChunk({ agentId: BOT, path: "/ignored", offset: 0, length: 8 })).totalSize, PNG.length);
   assert.equal(seen.length, 3);
 });
+
+test("nonexistent attachment path is ATTACHMENT_STALE", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-b1-missing");
+  const ghost = join(hermetic.dataRoot, "agents", BOT, "attachments", "ghost.txt");
+  await mkdir(join(hermetic.dataRoot, "agents", BOT, "attachments"), { recursive: true, mode: 0o700 });
+  assert.throws(() => assertSafeBotAttachmentPath(ghost, BOT, hermetic.dataRoot), (caught) => {
+    assert(caught instanceof AttachmentError);
+    assert.equal(caught.code, "ATTACHMENT_STALE");
+    return true;
+  });
+  const result = await handleBridgeRequest(
+    mockClient({
+      transcript: [{ id: "ghost", kind: "user-attachment", file_path: ghost, file_name: "ghost.txt", seq: 1 }],
+    }),
+    request("attachment_fetch", { bot_id: BOT, entry_id: "ghost", offset: 0, length: 16 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "ATTACHMENT_STALE");
+});
+
+test("dangling symlink in attachments is ATTACHMENT_REJECTED", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-b1-dangle");
+  const dangling = await writeBotAttachment(BOT, "dangle.json", "{}");
+  await rm(dangling);
+  await symlink(join(hermetic.base, "later.json"), dangling);
+  assert.throws(() => assertSafeBotAttachmentPath(dangling, BOT, hermetic.dataRoot), (caught) => {
+    assert(caught instanceof AttachmentError);
+    assert.equal(caught.code, "ATTACHMENT_STALE");
+    return true;
+  });
+  const result = await handleBridgeRequest(
+    mockClient({
+      transcript: [{ id: "dangle", kind: "user-attachment", file_path: dangling, file_name: "dangle.json", seq: 1 }],
+    }),
+    request("attachment_fetch", { bot_id: BOT, entry_id: "dangle", offset: 0, length: 16 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "ATTACHMENT_REJECTED");
+});
+
+test("hardlink in attachments is ATTACHMENT_REJECTED and does not leak", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-b3-hardlink");
+  const secretDir = join(hermetic.base, "home", ".config", "codex-grok-mcp");
+  await mkdir(secretDir, { recursive: true, mode: 0o700 });
+  const secret = join(secretDir, "bridge.json");
+  await writeFile(secret, '{"FIXTURE_SECRET":"s3cr3t"}', { mode: 0o600 });
+  const linked = join(hermetic.dataRoot, "agents", BOT, "attachments", "hard.json");
+  await mkdir(join(hermetic.dataRoot, "agents", BOT, "attachments"), { recursive: true, mode: 0o700 });
+  await link(secret, linked);
+  const result = await handleBridgeRequest(
+    mockClient({
+      transcript: [{ id: "hard", kind: "user-attachment", file_path: linked, file_name: "hard.json", seq: 1 }],
+    }),
+    request("attachment_fetch", { bot_id: BOT, entry_id: "hard", offset: 0, length: 64 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "ATTACHMENT_REJECTED");
+  assert.equal(JSON.stringify(result).includes("FIXTURE_SECRET"), false);
+});
+
+test("symlink swap after a successful confined open does not leak on later windows", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-b2-swap");
+  const secret = join(hermetic.base, "swap-secret.txt");
+  await writeFile(secret, "FIXTURE_SECRET".padEnd(70_000, "B"));
+  const big = await writeBotAttachment(BOT, "big.txt", "A".repeat(70_000));
+  const client = mockClient({
+    transcript: [{ id: "big", kind: "user-attachment", file_path: big, file_name: "big.txt", seq: 1 }],
+  });
+  const first = await handleBridgeRequest(
+    client,
+    request("attachment_fetch", { bot_id: BOT, entry_id: "big", offset: 0, length: 16 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(first.ok, true);
+  await rm(big);
+  await symlink(secret, big);
+  const second = await handleBridgeRequest(
+    client,
+    request("attachment_fetch", { bot_id: BOT, entry_id: "big", offset: 65_536, length: 4_464 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(second.ok, true);
+  assert.equal(Buffer.from(second.result.bytes_b64, "base64").toString("utf8").includes("FIXTURE_SECRET"), false);
+  assert.match(Buffer.from(second.result.bytes_b64, "base64").toString("utf8"), /^A+$/);
+  assert.deepEqual(client.calls.readAttachmentChunk, []);
+});
+
+test("symlink in attachments at fetch time is ATTACHMENT_REJECTED", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-symlink-fetch");
+  const secret = join(hermetic.base, "bridge-secret.json");
+  await writeFile(secret, '{"FIXTURE_SECRET":"s3cr3t"}');
+  const linked = join(hermetic.dataRoot, "agents", BOT, "attachments", "link.json");
+  await mkdir(join(hermetic.dataRoot, "agents", BOT, "attachments"), { recursive: true, mode: 0o700 });
+  await symlink(secret, linked);
+  const result = await handleBridgeRequest(
+    mockClient({
+      transcript: [{ id: "link", kind: "user-attachment", file_path: linked, file_name: "link.json", seq: 1 }],
+    }),
+    request("attachment_fetch", { bot_id: BOT, entry_id: "link", offset: 0, length: 64 }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "ATTACHMENT_REJECTED");
+});
+
+test("outbound denies grok auth.json by path and by file identity", async (context) => {
+  const home = join(hermetic.base, "deny-home");
+  const grokDir = join(home, ".grok");
+  await mkdir(grokDir, { recursive: true, mode: 0o700 });
+  const auth = join(grokDir, "auth.json");
+  await writeFile(auth, '{"token":"nope"}', { mode: 0o600 });
+  assert.throws(
+    () => validateLocalAttachmentFile(auth, "auth.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+  );
+  const copy = join(hermetic.base, "not-secret.json");
+  await link(auth, copy);
+  assert.throws(
+    () => validateLocalAttachmentFile(copy, "not-secret.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+  );
+});
+
+test("outbound denies pairing bridge.json and shows the resolved path on a safe file", async (context) => {
+  const home = join(hermetic.base, "pair-home");
+  const configDir = join(home, ".config", "codex-grok-mcp");
+  await mkdir(configDir, { recursive: true, mode: 0o700 });
+  const pairing = join(configDir, "bridge.json");
+  await writeFile(pairing, '{"key":"nope"}', { mode: 0o600 });
+  assert.throws(
+    () => validateLocalAttachmentFile(pairing, "bridge.json", { SAND_DATA_ROOT: hermetic.dataRoot }, home),
+    (caught) => caught instanceof AttachmentError && caught.code === "ATTACHMENT_REJECTED",
+  );
+  const safe = await writeText(hermetic.base, "ok.txt", "hello attachment\n");
+  const decision = validateLocalAttachmentFile(safe, "ok.txt", { SAND_DATA_ROOT: hermetic.dataRoot }, home);
+  assert.equal(decision.resolved_path, safe);
+});
+
+test("preview token binds bot, name, type, size, and sha", () => {
+  const token = attachmentPreviewToken({
+    bot_id: BOT,
+    path_identity: "a".repeat(64),
+    sha256: "b".repeat(64),
+    size: 12,
+    mime: "text/plain",
+    name: "note.txt",
+    roster_fingerprint: "sha256:" + "c".repeat(64),
+  });
+  const other = attachmentPreviewToken({
+    bot_id: OTHER_BOT,
+    path_identity: "a".repeat(64),
+    sha256: "b".repeat(64),
+    size: 12,
+    mime: "text/plain",
+    name: "note.txt",
+    roster_fingerprint: "sha256:" + "c".repeat(64),
+  });
+  assert.notEqual(token, other);
+  assert.match(token, /^[a-f0-9]{64}$/);
+});
+
+test("upload_id reuse after a store restart is ATTACHMENT_STALE", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-reuse");
+  const env = { SAND_DATA_ROOT: hermetic.dataRoot };
+  const bytes = Buffer.from("hello attachment\n");
+  const uploadId = randomUUID();
+  const first = await handleBridgeRequest(
+    mockClient(),
+    request("attachment_stage", {
+      upload_id: uploadId,
+      bot_id: BOT,
+      name: "note.txt",
+      mime: "text/plain",
+      total_size: bytes.length,
+      sha256: sha256(bytes),
+      seq: 0,
+      offset: 0,
+      bytes_b64: bytes.toString("base64"),
+    }),
+    { stagingRoot, env },
+  );
+  assert.equal(first.ok, true);
+  resetAttachmentSessionStore(stagingRoot);
+  const reused = await handleBridgeRequest(
+    mockClient(),
+    request("attachment_stage", {
+      upload_id: uploadId,
+      bot_id: BOT,
+      name: "note.txt",
+      mime: "text/plain",
+      total_size: bytes.length,
+      sha256: sha256(bytes),
+      seq: 0,
+      offset: 0,
+      bytes_b64: bytes.toString("base64"),
+    }),
+    { stagingRoot, env },
+  );
+  assert.equal(reused.ok, false);
+  assert.equal(reused.error.code, "ATTACHMENT_STALE");
+});
+
+test("whole-object SHA mismatch at stage completion is ATTACHMENT_INTEGRITY", async (context) => {
+  const stagingRoot = await fixtureDir(context, "att-sha-complete");
+  const bytes = Buffer.from("hello attachment\n");
+  const result = await handleBridgeRequest(
+    mockClient(),
+    request("attachment_stage", {
+      upload_id: randomUUID(),
+      bot_id: BOT,
+      name: "note.txt",
+      mime: "text/plain",
+      total_size: bytes.length,
+      sha256: "a".repeat(64),
+      seq: 0,
+      offset: 0,
+      bytes_b64: bytes.toString("base64"),
+    }),
+    { stagingRoot, env: { SAND_DATA_ROOT: hermetic.dataRoot } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "ATTACHMENT_INTEGRITY");
+});
+
+test("dot-dot in a filename segment is allowed when the path stays confined", () => {
+  assert.equal(
+    isUnderBotAttachmentRoots(
+      join(hermetic.dataRoot, "agents", BOT, "attachments", "a..b.txt"),
+      BOT,
+      hermetic.dataRoot,
+    ),
+    true,
+  );
+});
+
+test("tool preview transfers nothing and a preview mismatch is ROSTER_CHANGED", async (context) => {
+  const root = await fixtureDir(context, "att-tool-preview");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  let staged = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async stageAttachment() {
+      staged += 1;
+      throw new Error("should not stage");
+    },
+    async commitAttachment() {
+      throw new Error("should not commit");
+    },
+  };
+  const mcp = await openAttachmentMcp(transport);
+  try {
+    const preview = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: { bot_id: BOT, path },
+    });
+    assert.equal(preview.structuredContent.requires_confirmation, true);
+    assert.equal(preview.structuredContent.state, "validated");
+    assert.match(preview.content[0].text, /No file transferred/);
+    assert.match(preview.content[0].text, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(staged, 0);
+    const mismatch = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: "d".repeat(64),
+      },
+    });
+    assert.equal(mismatch.isError, true);
+    assert.match(mismatch.content[0].text, /ROSTER_CHANGED/);
+    assert.equal(staged, 0);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("declined attachment elicitation is CANCELLED with no stage call", async (context) => {
+  const root = await fixtureDir(context, "att-tool-decline");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  let staged = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async stageAttachment() {
+      staged += 1;
+    },
+    async commitAttachment() {
+      throw new Error("unused");
+    },
+  };
+  const previewServer = await openAttachmentMcp(transport);
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_send_bot_attachment",
+    arguments: { bot_id: BOT, path },
+  });
+  await previewServer.close();
+  const mcp = await openAttachmentMcp(transport, { approve: false });
+  try {
+    const declined = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: preview.structuredContent.preview_token,
+      },
+    });
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /CANCELLED/);
+    assert.equal(staged, 0);
+    assert.equal(mcp.elicitationRequests.length, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("send without stage or commit is UPGRADE_REQUIRED", async (context) => {
+  const root = await fixtureDir(context, "att-tool-upgrade");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+  };
+  const previewServer = await openAttachmentMcp(transport);
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_send_bot_attachment",
+    arguments: { bot_id: BOT, path },
+  });
+  await previewServer.close();
+  const mcp = await openAttachmentMcp(transport, { approve: true });
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: preview.structuredContent.preview_token,
+      },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /UPGRADE_REQUIRED/);
+    assert.match(result.content[0].text, /failed_stage=validated/);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("tool fetch returns one verified image and never treats a window as the whole file", async () => {
+  const body = Buffer.concat([PNG, Buffer.alloc(70_000, 0x41)]);
+  let fetches = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async fetchAttachment({ offset, length }) {
+      fetches += 1;
+      const window = body.subarray(offset, offset + length);
+      return {
+        bytes_b64: window.toString("base64"),
+        total_size: body.length,
+        sha256: sha256(body),
+        mime: "image/png",
+        name: "shot.png",
+        truncated: offset + window.length < body.length,
+      };
+    },
+  };
+  const mcp = await openAttachmentMcp(transport);
+  try {
+    const result = await mcp.request("tools/call", {
+      name: "grok_fetch_bot_attachment",
+      arguments: { bot_id: BOT, entry_id: "img-1" },
+    });
+    assert.equal(result.structuredContent.untrusted_external_content, true);
+    assert.equal(result.structuredContent.truncated, false);
+    assert.equal(result.structuredContent.total_size, body.length);
+    assert.equal(result.content[1].type, "image");
+    assert.equal(result.content[1].data, body.toString("base64"));
+    assert.match(result.content[0].text, /UNTRUSTED EXTERNAL CONTENT/);
+    assert.equal(fetches >= 2, true);
+  } finally {
+    await mcp.close();
+  }
+});
+

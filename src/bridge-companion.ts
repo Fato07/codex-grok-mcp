@@ -56,19 +56,18 @@ import {
   CODEX_GROK_VERSION,
 } from "./version.js";
 import {
-  ATTACHMENT_CHUNK_BYTES,
   AttachmentError,
   attachmentExtension,
   attachmentSessionStore,
-  assertSafeBotAttachmentPath,
+  assertAttachmentBotId,
   committedHostPathIsValid,
   decodeChunkBytes,
   defaultAttachmentStagingRoot,
   extractTranscriptAttachments,
   fetchSizeCap,
   isAttachmentHostAllowed,
+  openConfinedBotAttachment,
   sandRootForAttachments,
-  sniffMime,
   toPublicAttachmentMeta,
 } from "./attachments.js";
 
@@ -284,43 +283,12 @@ async function attachmentCapabilityError(
     return undefined;
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
+    if (caught instanceof LocalGatewayError && caught.status === 404) {
+      return responseError(request, "UPGRADE_REQUIRED", false);
+    }
     if (caught instanceof LocalGatewayError) return sdkFailure(request, caught, false);
     return responseError(request, "UPGRADE_REQUIRED", false);
   }
-}
-
-async function readWholeAttachment(input: {
-  client: BridgeClient;
-  botId: string;
-  path: string;
-  cap: number;
-}): Promise<{ bytes: Buffer; mime: string }> {
-  if (input.client.readAttachmentChunk === undefined) {
-    throw new AttachmentError("ATTACHMENT_REJECTED");
-  }
-  const chunks: Buffer[] = [];
-  let totalSize: number | undefined;
-  let offset = 0;
-  while (totalSize === undefined || offset < totalSize) {
-    const piece = await input.client.readAttachmentChunk({
-      agentId: input.botId,
-      path: input.path,
-      offset,
-      length: ATTACHMENT_CHUNK_BYTES,
-    });
-    if (piece === null) throw new AttachmentError("ATTACHMENT_STALE");
-    if (totalSize === undefined) {
-      if (piece.totalSize > input.cap) throw new AttachmentError("ATTACHMENT_TOO_LARGE");
-      totalSize = piece.totalSize;
-    }
-    const decoded = decodeChunkBytes(piece.bytesBase64);
-    chunks.push(decoded);
-    offset += decoded.length;
-    if (decoded.length === 0) break;
-  }
-  const bytes = Buffer.concat(chunks);
-  if (bytes.length > input.cap) throw new AttachmentError("ATTACHMENT_TOO_LARGE");
-  return { bytes, mime: "application/octet-stream" };
 }
 
 async function handleBridgeRequestWithGateway(
@@ -375,6 +343,19 @@ async function handleBridgeRequestWithGateway(
 
   const bot = bots.find((candidate) => candidate.id === request.args.bot_id);
   if (bot === undefined) return responseError(request, "BOT_NOT_FOUND", false);
+  if (
+    request.op === "attachment_stage" ||
+    request.op === "attachment_commit" ||
+    request.op === "attachment_fetch" ||
+    (request.op === "send_message" && request.args.attachment_refs !== undefined)
+  ) {
+    try {
+      assertAttachmentBotId(bot.id);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+      return responseError(request, "ATTACHMENT_REJECTED", false);
+    }
+  }
 
   if (request.op === "read_bot") {
     const agent = agents.find((candidate) => candidate.id === bot.id);
@@ -513,17 +494,35 @@ async function handleBridgeRequestWithGateway(
     if (located.fetchable === false || located.path === undefined || located.kind === "external") {
       return responseError(request, "ATTACHMENT_REJECTED", false);
     }
-    const safePath = assertSafeBotAttachmentPath(located.path, bot.id, sandRootForAttachments(env));
-    const { bytes } = await readWholeAttachment({
-      client,
-      botId: bot.id,
-      path: safePath,
-      cap: fetchSizeCap(located.kind),
-    });
-    const window = bytes.subarray(
-      request.args.offset,
-      request.args.offset + request.args.length,
-    );
+    const cached = store.lookupFetch(bot.id, located.entry_id);
+    const confined =
+      cached === undefined
+        ? openConfinedBotAttachment(
+            located.path,
+            bot.id,
+            sandRootForAttachments(env),
+            fetchSizeCap(located.kind),
+            located.name,
+          )
+        : undefined;
+    if (confined !== undefined) {
+      store.rememberFetch({
+        botId: bot.id,
+        entryId: located.entry_id,
+        sha256: confined.sha256,
+        mime: confined.mime,
+        name: located.name,
+        bytes: confined.bytes,
+        createdAt: store.now(),
+      });
+    }
+    const bytes = cached?.bytes ?? confined?.bytes;
+    const digest = cached?.sha256 ?? confined?.sha256;
+    const mime = cached?.mime ?? confined?.mime;
+    if (bytes === undefined || digest === undefined || mime === undefined) {
+      return responseError(request, "ATTACHMENT_STALE", false);
+    }
+    const window = bytes.subarray(request.args.offset, request.args.offset + request.args.length);
     if (window.length === 0) return responseError(request, "ATTACHMENT_REJECTED", false);
     return bridgeResponseSchema.parse({
       v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
@@ -533,8 +532,8 @@ async function handleBridgeRequestWithGateway(
       result: {
         bytes_b64: window.toString("base64"),
         total_size: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        mime: sniffMime(bytes, attachmentExtension(located.name)),
+        sha256: digest,
+        mime,
         name: located.name,
         truncated: request.args.offset > 0 || request.args.offset + window.length < bytes.length,
       },

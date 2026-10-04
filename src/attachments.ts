@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   rmSync,
@@ -13,8 +14,10 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultBridgeConfigPath } from "./bridge-pairing.js";
+import { defaultReplayRoot } from "./bridge-replay.js";
 import { TestRealDataRootError, grokBotDataRoot } from "./grok-bot-client.js";
 
 export const ATTACHMENT_PROTOCOL_VERSION = 4 as const;
@@ -27,6 +30,10 @@ export const ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 export const ATTACHMENT_CHUNK_BYTES = 64 * 1024;
 export const ATTACHMENT_TTL_MS = 15 * 60 * 1000;
 export const ATTACHMENT_NAME_MAX_BYTES = 255;
+export const ATTACHMENT_CHUNK_B64_MAX = 87_384;
+export const ATTACHMENT_MAX_STAGED_UPLOADS = 8;
+export const ATTACHMENT_MAX_STAGED_BYTES = 16 * 1024 * 1024;
+export const ATTACHMENT_BOT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export const ATTACHMENT_ERROR_CODES = [
   "ATTACHMENT_REJECTED",
@@ -57,6 +64,14 @@ export type LocalAttachmentDecision = {
   size: number;
   name: string;
   path_identity: string;
+  resolved_path: string;
+};
+
+export type ConfinedAttachmentBytes = {
+  bytes: Buffer;
+  sha256: string;
+  resolved_path: string;
+  mime: string;
 };
 
 export class AttachmentError extends Error {
@@ -81,6 +96,16 @@ type UploadRecord = {
   seqHashes: Map<number, string>;
   createdAt: number;
   complete: boolean;
+};
+
+type FetchCacheRecord = {
+  botId: string;
+  entryId: string;
+  sha256: string;
+  mime: string;
+  name: string;
+  bytes: Buffer;
+  createdAt: number;
 };
 
 export type CommittedAttachment = {
@@ -114,6 +139,27 @@ const ALLOWED_EXTENSIONS = new Set([
 
 function fail(code: AttachmentErrorCode, message?: string): never {
   throw new AttachmentError(code, message);
+}
+
+function isNodeError(caught: unknown): caught is NodeJS.ErrnoException {
+  return caught instanceof Error && "code" in caught;
+}
+
+function hasDotDotSegment(path: string): boolean {
+  return path.split(/[/\\]/).some((segment) => segment === "..");
+}
+
+export function assertAttachmentBotId(botId: string): void {
+  if (ATTACHMENT_BOT_ID_PATTERN.test(botId) === false) fail("ATTACHMENT_REJECTED");
+}
+
+function fdResolvedPath(fd: number, fallback: string): string {
+  try {
+    return realpathSync(`/proc/self/fd/${String(fd)}`);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    return realpathSync(fallback);
+  }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -256,10 +302,14 @@ export function logUnverifiedHostOverride(
 export function isAttachmentHostAllowed(
   hostVersion: string,
   env: NodeJS.ProcessEnv = process.env,
+  write?: (chunk: string) => unknown,
 ): boolean {
   const { versions, unverifiedExtra } = attachmentHostAllowlist(env);
-  logUnverifiedHostOverride(unverifiedExtra);
-  return versions.has(hostVersion);
+  const allowed = versions.has(hostVersion);
+  if (allowed && unverifiedExtra.includes(hostVersion)) {
+    logUnverifiedHostOverride(unverifiedExtra, write);
+  }
+  return allowed;
 }
 
 export function defaultAttachmentStagingRoot(
@@ -280,9 +330,35 @@ function sha256Buffer(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+export function attachmentPreviewToken(input: {
+  bot_id: string;
+  path_identity: string;
+  sha256: string;
+  size: number;
+  mime: string;
+  name: string;
+  roster_fingerprint: string;
+}): string {
+  return sha256Buffer(
+    Buffer.from(
+      [
+        input.bot_id,
+        input.path_identity,
+        input.sha256,
+        String(input.size),
+        input.mime,
+        input.name,
+        input.roster_fingerprint,
+      ].join("|"),
+      "utf8",
+    ),
+  );
+}
+
 function openNoFollow(path: string, flags: number, mode?: number): number {
   const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
-  return openSync(path, flags | noFollow, mode);
+  const nonblock = typeof fsConstants.O_NONBLOCK === "number" ? fsConstants.O_NONBLOCK : 0;
+  return openSync(path, flags | noFollow | nonblock, mode);
 }
 
 function assertRegularFile(path: string): Stats {
@@ -291,22 +367,116 @@ function assertRegularFile(path: string): Stats {
   return details;
 }
 
-export function validateLocalAttachmentFile(path: string, displayName?: string): LocalAttachmentDecision {
+function defaultCompanionLifecycleRoot(
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string {
+  const configuredRoot = environment.XDG_DATA_HOME;
+  const root =
+    configuredRoot !== undefined && configuredRoot !== "" && isAbsolute(configuredRoot)
+      ? configuredRoot
+      : join(home, ".local", "share");
+  return join(root, "codex-grok-mcp", "companion");
+}
+
+function deniedAttachmentLocations(
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): { prefixes: string[]; files: string[] } {
+  const prefixes: string[] = [];
+  const files: string[] = [];
+  const addPrefix = (value: string): void => {
+    prefixes.push(resolve(value));
+  };
+  const addFile = (value: string): void => {
+    files.push(resolve(value));
+  };
+  addPrefix(join(home, ".grok"));
+  addPrefix(join(home, ".codex"));
+  addPrefix(join(home, ".ssh"));
+  const configuredAuth = environment.GROK_MCP_AUTH_PATH?.trim();
+  addFile(
+    configuredAuth !== undefined && configuredAuth !== ""
+      ? isAbsolute(configuredAuth)
+        ? configuredAuth
+        : resolve(configuredAuth)
+      : join(home, ".grok", "auth.json"),
+  );
+  addFile(join(home, ".codex", "auth.json"));
+  const pairing = defaultBridgeConfigPath(environment, home);
+  addFile(pairing);
+  addFile(`${pairing}.lifecycle.json`);
+  addPrefix(dirname(pairing));
+  addPrefix(defaultCompanionLifecycleRoot(environment, home));
+  addPrefix(defaultReplayRoot(environment, home));
+  addPrefix(defaultAttachmentStagingRoot(environment, home));
+  try {
+    const sandRoot = grokBotDataRoot(environment);
+    addFile(join(sandRoot, "gateway.json"));
+    addPrefix(join(sandRoot, "config"));
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+  }
+  return { prefixes, files };
+}
+
+export function assertNotSensitiveAttachmentSource(
+  resolvedPath: string,
+  stats: Stats,
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): void {
+  const { prefixes, files } = deniedAttachmentLocations(environment, home);
+  const resolved = resolve(resolvedPath);
+  for (const prefix of prefixes) {
+    if (resolved === prefix || resolved.startsWith(`${prefix}${sep}`)) fail("ATTACHMENT_REJECTED");
+  }
+  const identities = new Set<string>();
+  for (const file of files) {
+    if (resolved === file) fail("ATTACHMENT_REJECTED");
+    try {
+      const details = lstatSync(file);
+      identities.add(`${details.dev}:${details.ino}`);
+      if (details.isSymbolicLink() === false) continue;
+      const real = realpathSync(file);
+      const realDetails = lstatSync(real);
+      identities.add(`${realDetails.dev}:${realDetails.ino}`);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+    }
+  }
+  if (identities.has(`${stats.dev}:${stats.ino}`)) fail("ATTACHMENT_REJECTED");
+}
+
+export function validateLocalAttachmentFile(
+  path: string,
+  displayName?: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): LocalAttachmentDecision {
   if (typeof path !== "string" || path.trim() === "" || isAbsolute(path) === false) {
     fail("ATTACHMENT_REJECTED");
   }
   const name = sanitizeAttachmentName(displayName ?? path);
   const extension = attachmentExtension(name);
   const initial = assertRegularFile(path);
+  if (initial.nlink !== 1) fail("ATTACHMENT_REJECTED");
   if (initial.size === 0) fail("ATTACHMENT_REJECTED");
   if (initial.size > ATTACHMENT_MAX_BYTES) fail("ATTACHMENT_TOO_LARGE");
   const fd = openNoFollow(path, fsConstants.O_RDONLY);
   try {
     const next = fstatSync(fd);
-    if (next.dev !== initial.dev || next.ino !== initial.ino || next.isFile() === false) {
+    if (
+      next.dev !== initial.dev ||
+      next.ino !== initial.ino ||
+      next.isFile() === false ||
+      next.nlink !== 1
+    ) {
       fail("ATTACHMENT_REJECTED");
     }
     if (next.size !== initial.size) fail("ATTACHMENT_REJECTED");
+    const resolvedPath = fdResolvedPath(fd, path);
+    assertNotSensitiveAttachmentSource(resolvedPath, next, environment, home);
     const bytes = Buffer.alloc(next.size);
     let offset = 0;
     while (offset < bytes.length) {
@@ -322,7 +492,8 @@ export function validateLocalAttachmentFile(path: string, displayName?: string):
       sha256: sha256Buffer(bytes),
       size: bytes.length,
       name,
-      path_identity: sha256Buffer(Buffer.from(`${next.dev}:${next.ino}:${resolve(path)}`, "utf8")),
+      path_identity: sha256Buffer(Buffer.from(`${next.dev}:${next.ino}:${resolvedPath}`, "utf8")),
+      resolved_path: resolvedPath,
     };
   } catch (caught) {
     if (caught instanceof TestRealDataRootError || caught instanceof AttachmentError) throw caught;
@@ -341,19 +512,13 @@ export function expectedCommittedPath(
   return join(sandRoot, "agents", botId, "attachments", `${sha256}${extension}`);
 }
 
-export function isBoxRootPath(path: string): boolean {
-  const lexical = resolve(path);
-  return ["/tmp", "/workspace", "/home", "/root"].some(
-    (root) => lexical === root || lexical.startsWith(`${root}${sep}`),
-  );
-}
-
 export function isUnderBotAttachmentRoots(
   path: string,
   botId: string,
   sandRoot: string,
 ): boolean {
-  if (isAbsolute(path) === false || path.includes("\0") || path.includes("..") || looksLikeUrl(path)) {
+  if (ATTACHMENT_BOT_ID_PATTERN.test(botId) === false) return false;
+  if (isAbsolute(path) === false || path.includes("\0") || hasDotDotSegment(path) || looksLikeUrl(path)) {
     return false;
   }
   const lexical = resolve(path);
@@ -365,16 +530,77 @@ export function isUnderBotAttachmentRoots(
 }
 
 export function assertSafeBotAttachmentPath(path: string, botId: string, sandRoot: string): string {
+  assertAttachmentBotId(botId);
   if (isUnderBotAttachmentRoots(path, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
-  let resolved = resolve(path);
+  let resolved: string;
   try {
     resolved = realpathSync(path);
   } catch (caught) {
     if (caught instanceof TestRealDataRootError) throw caught;
-    return resolved;
+    if (isNodeError(caught) && caught.code === "ENOENT") fail("ATTACHMENT_STALE");
+    fail("ATTACHMENT_REJECTED");
   }
   if (isUnderBotAttachmentRoots(resolved, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
   return resolved;
+}
+
+export function openConfinedBotAttachment(
+  path: string,
+  botId: string,
+  sandRoot: string,
+  cap: number,
+  displayName?: string,
+): ConfinedAttachmentBytes {
+  assertAttachmentBotId(botId);
+  if (isUnderBotAttachmentRoots(path, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
+  let initial: Stats;
+  try {
+    initial = lstatSync(path);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    if (isNodeError(caught) && caught.code === "ENOENT") fail("ATTACHMENT_STALE");
+    fail("ATTACHMENT_REJECTED");
+  }
+  if (initial.isSymbolicLink() || initial.isFile() === false || initial.nlink !== 1) {
+    fail("ATTACHMENT_REJECTED");
+  }
+  if (initial.size > cap) fail("ATTACHMENT_TOO_LARGE");
+  let fd: number;
+  try {
+    fd = openNoFollow(path, fsConstants.O_RDONLY);
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    if (isNodeError(caught) && caught.code === "ENOENT") fail("ATTACHMENT_STALE");
+    fail("ATTACHMENT_REJECTED");
+  }
+  try {
+    const next = fstatSync(fd);
+    if (
+      next.dev !== initial.dev ||
+      next.ino !== initial.ino ||
+      next.isFile() === false ||
+      next.nlink !== 1
+    ) {
+      fail("ATTACHMENT_REJECTED");
+    }
+    if (next.size > cap) fail("ATTACHMENT_TOO_LARGE");
+    const resolved = fdResolvedPath(fd, path);
+    if (isUnderBotAttachmentRoots(resolved, botId, sandRoot) === false) fail("ATTACHMENT_REJECTED");
+    const bytes = Buffer.alloc(next.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) fail("ATTACHMENT_STALE");
+      offset += read;
+    }
+    const mime = sniffMime(bytes, attachmentExtension(displayName ?? basename(resolved)));
+    return { bytes, sha256: sha256Buffer(bytes), resolved_path: resolved, mime };
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError || caught instanceof AttachmentError) throw caught;
+    throw new AttachmentError("ATTACHMENT_REJECTED");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function committedHostPathIsValid(
@@ -384,7 +610,7 @@ export function committedHostPathIsValid(
   extension: string,
   sandRoot: string,
 ): boolean {
-  if (typeof returnedPath !== "string" || returnedPath.includes("\0") || returnedPath.includes("..")) {
+  if (typeof returnedPath !== "string" || returnedPath.includes("\0") || hasDotDotSegment(returnedPath)) {
     return false;
   }
   if (basename(returnedPath) !== `${sha256}${extension}`) return false;
@@ -499,12 +725,14 @@ export class AttachmentSessionStore {
   readonly #root: string;
   readonly #uploads = new Map<string, UploadRecord>();
   readonly #committed = new Map<string, CommittedAttachment>();
+  readonly #fetches = new Map<string, FetchCacheRecord>();
   now: () => number;
 
   constructor(root: string, now: () => number = Date.now) {
     if (isAbsolute(root) === false) fail("ATTACHMENT_REJECTED");
     this.#root = root;
     this.now = now;
+    this.sweep();
   }
 
   get root(): string {
@@ -518,6 +746,20 @@ export class AttachmentSessionStore {
     for (const [ref, record] of this.#committed) {
       if (now - record.createdAt > ATTACHMENT_TTL_MS) this.#committed.delete(ref);
     }
+    for (const [key, record] of this.#fetches) {
+      if (now - record.createdAt > ATTACHMENT_TTL_MS) this.#fetches.delete(key);
+    }
+    this.#sweepDisk(now);
+  }
+
+  rememberFetch(record: FetchCacheRecord): void {
+    this.sweep();
+    this.#fetches.set(`${record.botId}:${record.entryId}`, record);
+  }
+
+  lookupFetch(botId: string, entryId: string): FetchCacheRecord | undefined {
+    this.sweep();
+    return this.#fetches.get(`${botId}:${entryId}`);
   }
 
   stage(input: {
@@ -553,12 +795,25 @@ export class AttachmentSessionStore {
     }
     if (record === undefined) {
       if (input.seq !== 0 || input.offset !== 0) fail("ATTACHMENT_STALE");
+      if (this.#uploads.size >= ATTACHMENT_MAX_STAGED_UPLOADS) fail("ATTACHMENT_REJECTED");
+      let stagedBytes = 0;
+      for (const existing of this.#uploads.values()) stagedBytes += existing.totalSize;
+      if (stagedBytes + input.totalSize > ATTACHMENT_MAX_STAGED_BYTES) fail("ATTACHMENT_TOO_LARGE");
       ensurePrivateDirectory(directory);
-      const handle = openNoFollow(
-        this.#dataPath(input.uploadId),
-        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
-        0o600,
-      );
+      let handle: number;
+      try {
+        handle = openNoFollow(
+          this.#dataPath(input.uploadId),
+          fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
+          0o600,
+        );
+      } catch (caught) {
+        if (caught instanceof TestRealDataRootError || caught instanceof AttachmentError) throw caught;
+        if (isNodeError(caught) && caught.code === "EEXIST") {
+          fail("ATTACHMENT_STALE", "upload_id already exists on disk");
+        }
+        fail("ATTACHMENT_REJECTED");
+      }
       try {
         writeSync(handle, input.bytes, 0, input.bytes.length, 0);
       } finally {
@@ -696,6 +951,37 @@ export class AttachmentSessionStore {
       if (caught instanceof TestRealDataRootError) throw caught;
     }
   }
+
+  #sweepDisk(now: number): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.#root);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+      if (isNodeError(caught) && caught.code === "ENOENT") return;
+      return;
+    }
+    for (const name of names) {
+      if (this.#uploads.has(name)) continue;
+      const directory = join(this.#root, name);
+      try {
+        const details = lstatSync(directory);
+        if (details.isSymbolicLink()) {
+          rmSync(directory, { force: true });
+          continue;
+        }
+        if (details.isDirectory() === false) {
+          rmSync(directory, { force: true });
+          continue;
+        }
+        if (now - details.mtimeMs > ATTACHMENT_TTL_MS) {
+          rmSync(directory, { recursive: true, force: true });
+        }
+      } catch (caught) {
+        if (caught instanceof TestRealDataRootError) throw caught;
+      }
+    }
+  }
 }
 
 const stores = new Map<string, AttachmentSessionStore>();
@@ -723,14 +1009,16 @@ export function sandRootForAttachments(env: NodeJS.ProcessEnv = process.env): st
 }
 
 export function decodeChunkBytes(bytesB64: string): Buffer {
-  if (typeof bytesB64 !== "string" || bytesB64.length === 0) fail("ATTACHMENT_REJECTED");
+  if (typeof bytesB64 !== "string" || bytesB64.length === 0 || bytesB64.length > ATTACHMENT_CHUNK_B64_MAX) {
+    fail("ATTACHMENT_REJECTED");
+  }
   let bytes: Buffer;
   try {
     bytes = Buffer.from(bytesB64, "base64");
   } catch {
     fail("ATTACHMENT_REJECTED");
   }
-  if (bytes.length === 0) fail("ATTACHMENT_REJECTED");
+  if (bytes.length === 0 || bytes.toString("base64") !== bytesB64) fail("ATTACHMENT_REJECTED");
   return bytes;
 }
 
