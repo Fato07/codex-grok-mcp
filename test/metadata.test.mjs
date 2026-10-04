@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -192,10 +192,13 @@ test("documented Grok models match the shared finite tuple", async () => {
 test("npm pack excludes attachment test-hooks files", async () => {
   const repo = fileURLToPath(new URL("..", import.meta.url));
   const sourceDist = join(repo, "dist");
-  const before = new Map();
-  for (const name of await readdir(sourceDist)) {
-    before.set(name, (await stat(join(sourceDist, name))).mtimeMs);
-  }
+  const distMtimes = async (dir) => {
+    const names = (await readdir(dir)).sort();
+    const times = {};
+    for (const name of names) times[name] = (await stat(join(dir, name))).mtimeMs;
+    return times;
+  };
+  const before = await distMtimes(sourceDist);
   const dest = await mkdtemp(join(tmpdir(), "codex-grok-pack-"));
   try {
     const pkgDir = join(dest, "src-pkg");
@@ -203,8 +206,11 @@ test("npm pack excludes attachment test-hooks files", async () => {
     delete packed.scripts?.prepare;
     delete packed.scripts?.prepublishOnly;
     packed.files = ["dist", "!dist/**/*test-hooks*"];
-    await mkdir(pkgDir, { recursive: true });
-    await cp(sourceDist, join(pkgDir, "dist"), { recursive: true });
+    const packedDist = join(pkgDir, "dist");
+    await mkdir(packedDist, { recursive: true });
+    for (const name of Object.keys(before)) {
+      await writeFile(join(packedDist, name), await readFile(join(sourceDist, name)));
+    }
     await writeFile(join(pkgDir, "package.json"), `${JSON.stringify(packed, null, 2)}\n`);
     const { stdout } = await execFileAsync("npm", ["pack", "--json", `--pack-destination=${dest}`], {
       cwd: pkgDir,
@@ -236,11 +242,7 @@ test("npm pack excludes attachment test-hooks files", async () => {
       }
     }
     assert.deepEqual(hits, []);
-    const after = new Map();
-    for (const name of await readdir(sourceDist)) {
-      after.set(name, (await stat(join(sourceDist, name))).mtimeMs);
-    }
-    assert.deepEqual([...after], [...before]);
+    assert.deepEqual(await distMtimes(sourceDist), before);
   } finally {
     await rm(dest, { recursive: true, force: true });
   }
