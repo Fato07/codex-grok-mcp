@@ -10,9 +10,12 @@ import {
   LocalGrokBotClient,
   TestRealDataRootError,
   type LocalAgentSummary,
+  type LocalAttachmentChunk,
   type LocalGatewayDiscovery,
   type LocalGatewayHealth,
+  type LocalHostStatus,
   type LocalSendPromptInput,
+  type LocalUploadAttachmentResult,
 } from "./grok-bot-client.js";
 import WebSocket, { type RawData } from "ws";
 import {
@@ -20,6 +23,7 @@ import {
   bridgeResponseSchema,
   createBridgeReadSnapshot,
   type BridgeErrorCode,
+  type BridgeErrorReason,
   type BridgeRequest,
   type BridgeResponse,
 } from "./bridge-protocol.js";
@@ -44,11 +48,29 @@ import {
 } from "./bridge-lifecycle.js";
 import { BridgeRuntimeError, CompanionLease } from "./bridge-runtime.js";
 import {
+  BRIDGE_ADVERTISED_PROTOCOL_VERSIONS,
+  BRIDGE_ATTACHMENT_CAPABILITIES,
+  BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
   BRIDGE_CAPABILITIES,
   BRIDGE_PROTOCOL_VERSIONS,
   BRIDGE_STATUS_PROTOCOL_VERSION,
   CODEX_GROK_VERSION,
 } from "./version.js";
+import {
+  AttachmentError,
+  attachmentExtension,
+  attachmentSessionStore,
+  assertAttachmentBotId,
+  committedHostPathIsValid,
+  decodeChunkBytes,
+  defaultAttachmentStagingRoot,
+  extractTranscriptAttachments,
+  fetchSizeCap,
+  isAttachmentHostAllowed,
+  openConfinedBotAttachment,
+  sandRootForAttachments,
+  toPublicAttachmentMeta,
+} from "./attachments.js";
 
 const PROBE_TIMEOUT_MS = 5_000;
 const BRIDGE_GATEWAY_TIMEOUT_MS = 10_000;
@@ -57,7 +79,43 @@ const FRAME_AUTH_FAILED_CLOSE_CODE = 4401;
 const REQUEST_FRESHNESS_MS = 60_000;
 const REPLAY_RETENTION_MS = REQUEST_FRESHNESS_MS * 2;
 const MAX_RECENT_REQUESTS = 1_024;
-const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+export const RELAY_PING_INTERVAL_MS = 30_000;
+export const RELAY_PONG_DEADLINE_MS = 10_000;
+export const RELAY_HEALTHY_UPTIME_MS = 10_000;
+export const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+const CONNECTING_CLOSED_ERROR = "WebSocket was closed before the connection was established";
+
+type LivenessHandle = ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
+
+const livenessTimers = new Set<LivenessHandle>();
+
+function trackLivenessTimer<T extends LivenessHandle>(handle: T): T {
+  livenessTimers.add(handle);
+  return handle;
+}
+
+function clearTrackedTimeout(handle: ReturnType<typeof setTimeout> | undefined): void {
+  if (handle === undefined) return;
+  clearTimeout(handle);
+  livenessTimers.delete(handle);
+}
+
+function clearTrackedInterval(handle: ReturnType<typeof setInterval> | undefined): void {
+  if (handle === undefined) return;
+  clearInterval(handle);
+  livenessTimers.delete(handle);
+}
+
+export function livenessTimerCountForTests(): number {
+  return livenessTimers.size;
+}
+
+export type RunBridgeOptions = {
+  pingIntervalMs?: number;
+  pongDeadlineMs?: number;
+  healthyUptimeMs?: number;
+  reconnectDelaysMs?: readonly number[];
+};
 
 export type BridgeProbeClient = {
   discovery(): Pick<LocalGatewayDiscovery, "port" | "pid" | "hasToken">;
@@ -87,6 +145,25 @@ export type BridgeClient = BridgeProbeClient & {
   getAsyncTasks(input: { id: string }): Promise<unknown[]>;
   getSubagents(input: { id: string }): Promise<Array<{ status: string }>>;
   sendPrompt(input: LocalSendPromptInput): Promise<{ accepted: true }>;
+  getHostStatus?(input?: { includeManagedCapabilities?: boolean }): Promise<Pick<LocalHostStatus, "hostVersion">>;
+  uploadAttachment?(input: {
+    agentId: string;
+    filename: string;
+    bytesBase64: string;
+  }): Promise<LocalUploadAttachmentResult>;
+  readAttachmentChunk?(input: {
+    agentId: string;
+    path: string;
+    offset: number;
+    length: number;
+  }): Promise<LocalAttachmentChunk | null>;
+};
+
+export type BridgeRequestContext = {
+  stagingRoot?: string;
+  env?: NodeJS.ProcessEnv;
+  now?: () => number;
+  resolveOpenedFd?: (fd: number) => string;
 };
 
 export type BridgeProbeResult = {
@@ -165,6 +242,8 @@ function responseError(
   code: BridgeErrorCode,
   deliveryMayHaveOccurred: boolean,
   requestId?: string,
+  commitMayHaveOccurred?: boolean,
+  reason?: BridgeErrorReason,
 ): BridgeResponse {
   return {
     v: request.v,
@@ -173,7 +252,11 @@ function responseError(
     error: {
       code,
       delivery_may_have_occurred: deliveryMayHaveOccurred,
-      ...(requestId === undefined ? {} : { request_id: requestId }),
+      ...(commitMayHaveOccurred === undefined
+        ? {}
+        : { commit_may_have_occurred: commitMayHaveOccurred }),
+      ...(requestId === undefined || requestId === "" ? {} : { request_id: requestId }),
+      ...(reason === undefined ? {} : { reason }),
     },
   };
 }
@@ -182,9 +265,14 @@ function sdkFailure(
   request: BridgeRequest,
   caught: unknown,
   sendStarted: boolean,
+  commitMayHaveOccurred?: boolean,
 ): BridgeResponse {
+  if (caught instanceof TestRealDataRootError) throw caught;
+  if (caught instanceof AttachmentError) {
+    return responseError(request, caught.code, sendStarted, undefined, commitMayHaveOccurred);
+  }
   if (!(caught instanceof LocalGatewayError)) {
-    return responseError(request, "UNAVAILABLE", sendStarted);
+    return responseError(request, "UNAVAILABLE", sendStarted, undefined, commitMayHaveOccurred);
   }
   const code: BridgeErrorCode = caught.code;
   return responseError(
@@ -192,28 +280,83 @@ function sdkFailure(
     code,
     sendStarted,
     caught.requestId,
+    commitMayHaveOccurred,
+    caught.reason === "GATEWAY_ENV_MISMATCH" ? "GATEWAY_ENV_MISMATCH" : undefined,
   );
 }
 
 export async function handleBridgeRequest(
   client: BridgeClient,
   request: BridgeRequest,
+  context: BridgeRequestContext = {},
 ): Promise<BridgeResponse> {
   try {
     return await (client.withGatewaySnapshot === undefined
-      ? handleBridgeRequestWithGateway(client, request)
-      : client.withGatewaySnapshot(() => handleBridgeRequestWithGateway(client, request)));
+      ? handleBridgeRequestWithGateway(client, request, context)
+      : client.withGatewaySnapshot(() =>
+          handleBridgeRequestWithGateway(client, request, context),
+        ));
   } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
     return sdkFailure(request, caught, false);
+  }
+}
+
+function requestContext(context: BridgeRequestContext): {
+  env: NodeJS.ProcessEnv;
+  store: ReturnType<typeof attachmentSessionStore>;
+} {
+  const env = context.env ?? process.env;
+  return {
+    env,
+    store: attachmentSessionStore(
+      context.stagingRoot ?? defaultAttachmentStagingRoot(env),
+      context.now,
+    ),
+  };
+}
+
+async function attachmentCapabilityError(
+  client: BridgeClient,
+  request: BridgeRequest,
+  env: NodeJS.ProcessEnv,
+): Promise<BridgeResponse | undefined> {
+  try {
+    if (client.getHostStatus === undefined) return responseError(request, "UPGRADE_REQUIRED", false);
+    const host = await client.getHostStatus();
+    if (isAttachmentHostAllowed(host.hostVersion, env) === false) {
+      return responseError(request, "UPGRADE_REQUIRED", false);
+    }
+    return undefined;
+  } catch (caught) {
+    if (caught instanceof TestRealDataRootError) throw caught;
+    if (caught instanceof LocalGatewayError && caught.status === 404) {
+      return responseError(request, "UPGRADE_REQUIRED", false);
+    }
+    if (caught instanceof LocalGatewayError) return sdkFailure(request, caught, false);
+    return responseError(request, "UPGRADE_REQUIRED", false);
   }
 }
 
 async function handleBridgeRequestWithGateway(
   client: BridgeClient,
   request: BridgeRequest,
+  context: BridgeRequestContext,
 ): Promise<BridgeResponse> {
+  const { env, store } = requestContext(context);
   if (request.op === "status") {
     const [health, agents] = await Promise.all([client.health(), client.listAgents()]);
+    let extraCapabilities: string[] = [];
+    try {
+      if (client.getHostStatus !== undefined) {
+        const host = await client.getHostStatus();
+        if (isAttachmentHostAllowed(host.hostVersion, env)) {
+          extraCapabilities = [...BRIDGE_ATTACHMENT_CAPABILITIES];
+        }
+      }
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+    }
     return bridgeResponseSchema.parse({
       v: BRIDGE_STATUS_PROTOCOL_VERSION,
       id: request.id,
@@ -221,8 +364,8 @@ async function handleBridgeRequestWithGateway(
       ok: true,
       result: {
         companion_version: CODEX_GROK_VERSION,
-        supported_protocol_versions: [...BRIDGE_PROTOCOL_VERSIONS],
-        capabilities: [...BRIDGE_CAPABILITIES],
+        supported_protocol_versions: [...BRIDGE_ADVERTISED_PROTOCOL_VERSIONS],
+        capabilities: [...BRIDGE_CAPABILITIES, ...extraCapabilities],
         gateway_healthy: health.ok,
         gateway_busy: health.isBusy,
         non_group_bot_count: agents.filter((agent) => !agent.isGroup).length,
@@ -247,6 +390,19 @@ async function handleBridgeRequestWithGateway(
 
   const bot = bots.find((candidate) => candidate.id === request.args.bot_id);
   if (bot === undefined) return responseError(request, "BOT_NOT_FOUND", false);
+  if (
+    request.op === "attachment_stage" ||
+    request.op === "attachment_commit" ||
+    request.op === "attachment_fetch" ||
+    (request.op === "send_message" && request.args.attachment_refs !== undefined)
+  ) {
+    try {
+      assertAttachmentBotId(bot.id);
+    } catch (caught) {
+      if (caught instanceof TestRealDataRootError) throw caught;
+      return responseError(request, "ATTACHMENT_REJECTED", false);
+    }
+  }
 
   if (request.op === "read_bot") {
     const agent = agents.find((candidate) => candidate.id === bot.id);
@@ -265,7 +421,7 @@ async function handleBridgeRequestWithGateway(
     if (tail.entries.length > request.args.limit) {
       return responseError(request, "INVALID_RESPONSE", false);
     }
-    const result = createBridgeReadSnapshot({
+    const snapshot = createBridgeReadSnapshot({
       bot_id: bot.id,
       is_running: bot.is_running,
       is_composing: agent.isComposingMessage ?? null,
@@ -278,26 +434,180 @@ async function handleBridgeRequestWithGateway(
       entries: tail.entries,
       next_before_sequence: tail.nextBeforeSeq ?? null,
     });
+    if (request.v !== BRIDGE_ATTACHMENT_PROTOCOL_VERSION) {
+      return bridgeResponseSchema.parse({
+        v: 2,
+        id: request.id,
+        op: request.op,
+        ok: true,
+        result: snapshot,
+      });
+    }
     return bridgeResponseSchema.parse({
-      v: 2,
+      v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
       id: request.id,
       op: request.op,
       ok: true,
-      result,
+      result: {
+        ...snapshot,
+        attachments: extractTranscriptAttachments(tail.entries, bot.id).map(toPublicAttachmentMeta),
+      },
+    });
+  }
+
+  if (
+    request.op === "attachment_stage" ||
+    request.op === "attachment_commit" ||
+    request.op === "attachment_fetch" ||
+    (request.op === "send_message" && request.args.attachment_refs !== undefined)
+  ) {
+    const gated = await attachmentCapabilityError(client, request, env);
+    if (gated !== undefined) return gated;
+  }
+
+  if (request.op === "attachment_stage") {
+    const staged = store.stage({
+      uploadId: request.args.upload_id,
+      botId: bot.id,
+      name: request.args.name,
+      mime: request.args.mime,
+      totalSize: request.args.total_size,
+      sha256: request.args.sha256,
+      seq: request.args.seq,
+      offset: request.args.offset,
+      bytes: decodeChunkBytes(request.args.bytes_b64),
+    });
+    return bridgeResponseSchema.parse({
+      v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+      id: request.id,
+      op: request.op,
+      ok: true,
+      result: {
+        state: "staged",
+        upload_id: request.args.upload_id,
+        received_bytes: staged.received,
+        total_size: staged.totalSize,
+        complete: staged.complete,
+      },
+    });
+  }
+
+  if (request.op === "attachment_commit") {
+    const completed = store.takeComplete(request.args.upload_id, bot.id);
+    const fresh = await client.listAgents();
+    if (fresh.some((agent) => agent.isGroup === false && agent.id === bot.id) === false) {
+      return responseError(request, "ATTACHMENT_STALE", false);
+    }
+    if (client.uploadAttachment === undefined) return responseError(request, "UPGRADE_REQUIRED", false);
+    let commitStarted = false;
+    try {
+      commitStarted = true;
+      const uploaded = await client.uploadAttachment({
+        agentId: bot.id,
+        filename: completed.record.name,
+        bytesBase64: completed.bytes.toString("base64"),
+      });
+      const extension = attachmentExtension(completed.record.name);
+      if (
+        committedHostPathIsValid(
+          uploaded.path,
+          bot.id,
+          completed.record.sha256,
+          extension,
+          sandRootForAttachments(env),
+        ) === false
+      ) {
+        return responseError(request, "ATTACHMENT_INTEGRITY", false, undefined, true);
+      }
+      const attachmentRef = store.rememberCommit(completed.record, uploaded.path);
+      return bridgeResponseSchema.parse({
+        v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+        id: request.id,
+        op: request.op,
+        ok: true,
+        result: { state: "committed", attachment_ref: attachmentRef },
+      });
+    } catch (caught) {
+      return sdkFailure(request, caught, false, commitStarted);
+    }
+  }
+
+  if (request.op === "attachment_fetch") {
+    const tail = await client.getAgentTranscriptTail({ id: bot.id, limit: 50 });
+    const located = extractTranscriptAttachments(tail.entries, bot.id).find(
+      (entry) => entry.entry_id === request.args.entry_id,
+    );
+    if (located === undefined) return responseError(request, "ATTACHMENT_STALE", false);
+    if (located.fetchable === false || located.path === undefined || located.kind === "external") {
+      return responseError(request, "ATTACHMENT_REJECTED", false);
+    }
+    const cached = store.lookupFetch(bot.id, located.entry_id);
+    const confined =
+      cached === undefined
+        ? openConfinedBotAttachment(
+            located.path,
+            bot.id,
+            sandRootForAttachments(env),
+            fetchSizeCap(located.kind),
+            located.name,
+            context.resolveOpenedFd,
+          )
+        : undefined;
+    if (confined !== undefined) {
+      store.rememberFetch({
+        botId: bot.id,
+        entryId: located.entry_id,
+        sha256: confined.sha256,
+        mime: confined.mime,
+        name: located.name,
+        bytes: confined.bytes,
+        createdAt: store.now(),
+      });
+    }
+    const bytes = cached?.bytes ?? confined?.bytes;
+    const digest = cached?.sha256 ?? confined?.sha256;
+    const mime = cached?.mime ?? confined?.mime;
+    if (bytes === undefined || digest === undefined || mime === undefined) {
+      return responseError(request, "ATTACHMENT_STALE", false);
+    }
+    const window = bytes.subarray(request.args.offset, request.args.offset + request.args.length);
+    if (window.length === 0) return responseError(request, "ATTACHMENT_REJECTED", false);
+    return bridgeResponseSchema.parse({
+      v: BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+      id: request.id,
+      op: request.op,
+      ok: true,
+      result: {
+        bytes_b64: window.toString("base64"),
+        total_size: bytes.length,
+        sha256: digest,
+        mime,
+        name: located.name,
+        truncated: request.args.offset > 0 || request.args.offset + window.length < bytes.length,
+      },
     });
   }
 
   let sendStarted = false;
   try {
+    const attachmentRefs = request.op === "send_message" ? request.args.attachment_refs : undefined;
+    const committed =
+      attachmentRefs === undefined ? undefined : store.lookup(attachmentRefs[0], bot.id);
     sendStarted = true;
     const receipt = await client.sendPrompt({
       agentId: bot.id,
       prompt: request.args.message,
       clientNonce: request.id,
+      ...(committed === undefined
+        ? {}
+        : {
+            attachmentPaths: [committed.path],
+            attachmentNames: [committed.name],
+          }),
     });
     if (receipt.accepted !== true) return responseError(request, "INVALID_RESPONSE", true);
     return {
-      v: 1,
+      v: request.v,
       id: request.id,
       op: request.op,
       ok: true,
@@ -318,15 +628,18 @@ type BridgeRuntimeState = {
   busy: boolean;
   recentRequests: Map<string, RecentRequest>;
   replayGuard: PersistentReplayGuard;
+  requestContext: BridgeRequestContext;
 };
 
 async function connectOnce(
   config: PairingConfig,
   client: BridgeClient,
   state: BridgeRuntimeState,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (signal?.aborted) return;
+  signal: AbortSignal | undefined,
+  liveness: { pingIntervalMs: number; pongDeadlineMs: number; healthyUptimeMs: number },
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+  let provenHealthy = false;
   await new Promise<void>((resolve) => {
     const socket = new WebSocket(bridgeSocketUrl(config), {
       followRedirects: false,
@@ -336,25 +649,83 @@ async function connectOnce(
       perMessageDeflate: false,
     });
     let settled = false;
+    let pingTimer: ReturnType<typeof setInterval> | undefined;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let healthyTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const clearLiveness = (): void => {
+      clearTrackedInterval(pingTimer);
+      clearTrackedTimeout(deadlineTimer);
+      clearTrackedTimeout(healthyTimer);
+      pingTimer = undefined;
+      deadlineTimer = undefined;
+      healthyTimer = undefined;
+    };
+    const markHealthy = (): void => {
+      provenHealthy = true;
+    };
+    const noteInbound = (): void => {
+      clearTrackedTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    };
+    const armDeadline = (): void => {
+      clearTrackedTimeout(deadlineTimer);
+      deadlineTimer = trackLivenessTimer(setTimeout(() => finish(), liveness.pongDeadlineMs));
+    };
+    const startLiveness = (): void => {
+      healthyTimer = trackLivenessTimer(setTimeout(markHealthy, liveness.healthyUptimeMs));
+      pingTimer = trackLivenessTimer(
+        setInterval(() => {
+          if (socket.readyState !== WebSocket.OPEN) {
+            finish();
+            return;
+          }
+          try {
+            socket.ping();
+          } catch {
+            finish();
+            return;
+          }
+          armDeadline();
+        }, liveness.pingIntervalMs),
+      );
+    };
 
     const finish = (): void => {
       if (settled) return;
       settled = true;
+      clearLiveness();
       signal?.removeEventListener("abort", onAbort);
+      const connecting = socket.readyState === WebSocket.CONNECTING;
       socket.removeAllListeners();
+      if (connecting) {
+        // ws 8.x terminate() during CONNECTING emits this error on nextTick; it does not throw.
+        socket.on("error", (error: Error) => {
+          if (error.message === CONNECTING_CLOSED_ERROR) return;
+          throw error;
+        });
+      }
       socket.terminate();
       resolve();
     };
     const onAbort = (): void => finish();
     signal?.addEventListener("abort", onAbort, { once: true });
+    socket.once("open", startLiveness);
+    socket.on("pong", () => {
+      noteInbound();
+      markHealthy();
+    });
+    socket.on("ping", noteInbound);
 
     socket.on("message", (data, isBinary) => {
+      noteInbound();
       if (settled || signal?.aborted) return;
       const handler = (async () => {
         let request: BridgeRequest;
         try {
           const plaintext = decryptFrame(config, "codex", textFrame(data, isBinary));
           request = bridgeRequestSchema.parse(JSON.parse(plaintext.toString("utf8")));
+          markHealthy();
         } catch (caught) {
           const authenticationFailed =
             caught instanceof BridgePairingError && caught.code === "frame_auth_failed";
@@ -420,7 +791,7 @@ async function connectOnce(
           : await (async () => {
               state.busy = true;
               try {
-                return await handleBridgeRequest(client, request);
+                return await handleBridgeRequest(client, request, state.requestContext);
               } finally {
                 state.busy = false;
               }
@@ -448,6 +819,7 @@ async function connectOnce(
     socket.once("close", finish);
     socket.once("error", finish);
   });
+  return provenHealthy;
 }
 
 function waitForReconnect(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -472,8 +844,14 @@ export async function runBridge(
   signal?: AbortSignal,
   replayRoot?: string,
   onReady?: () => Promise<void>,
+  requestContext: BridgeRequestContext = {},
+  options: RunBridgeOptions = {},
 ): Promise<void> {
   let attempt = 0;
+  const pingIntervalMs = options.pingIntervalMs ?? RELAY_PING_INTERVAL_MS;
+  const pongDeadlineMs = options.pongDeadlineMs ?? RELAY_PONG_DEADLINE_MS;
+  const healthyUptimeMs = options.healthyUptimeMs ?? RELAY_HEALTHY_UPTIME_MS;
+  const reconnectDelaysMs = options.reconnectDelaysMs ?? RECONNECT_DELAYS_MS;
   const state: BridgeRuntimeState = {
     activeHandlers: new Set(),
     busy: false,
@@ -483,13 +861,19 @@ export async function runBridge(
       REPLAY_RETENTION_MS,
       replayRoot,
     ),
+    requestContext,
   };
   await onReady?.();
   try {
     while (!signal?.aborted) {
-      await connectOnce(config, client, state, signal);
+      const established = await connectOnce(config, client, state, signal, {
+        pingIntervalMs,
+        pongDeadlineMs,
+        healthyUptimeMs,
+      });
       if (signal?.aborted) break;
-      const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+      if (established) attempt = 0;
+      const delay = reconnectDelaysMs[Math.min(attempt, reconnectDelaysMs.length - 1)];
       await waitForReconnect(delay ?? 15_000, signal);
       attempt += 1;
     }

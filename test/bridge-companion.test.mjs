@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { createServer } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,9 @@ import { WebSocketServer } from "ws";
 import { BridgeLifecycleError } from "../dist/bridge-lifecycle.js";
 import {
   handleBridgeRequest,
+  livenessTimerCountForTests,
+  RECONNECT_DELAYS_MS,
+  RELAY_HEALTHY_UPTIME_MS,
   runBridge,
   runBridgeCompanion,
 } from "../dist/bridge-companion.js";
@@ -352,7 +356,7 @@ test("status handshake returns only allowlisted companion and gateway metadata",
 
   assert.deepEqual(result.result, {
     companion_version: CODEX_GROK_VERSION,
-    supported_protocol_versions: [1, 2, 3],
+    supported_protocol_versions: [1, 2, 3, 4],
     capabilities: ["status", "list_bots", "read_bot", "send_message"],
     gateway_healthy: true,
     gateway_busy: true,
@@ -1012,4 +1016,515 @@ test("companion returns a bounded sanitized read-only Bot snapshot", async () =>
   assert.equal(group.error.code, "BOT_NOT_FOUND");
   assert.equal(group.v, 2);
   assert.equal(transcriptCalls.length, 2);
+});
+
+function idleBridgeClient() {
+  return {
+    discovery: () => ({ port: 1340, pid: 1, hasToken: true }),
+    health: async () => ({ ok: true, isBusy: false }),
+    listAgents: async () => [{ id: "bot-1", name: "Ada", isGroup: false, isRunning: true }],
+    sendPrompt: async () => ({ accepted: true }),
+  };
+}
+
+async function waitForCount(items, count, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (items.length < count) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${count} events; saw ${items.length}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("a silent relay without pongs reconnects after the ping deadline", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-liveness-silent-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0, autoPong: false });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  relay.on("connection", () => connections.push(Date.now()));
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    reconnectDelaysMs: [20],
+  });
+  try {
+    await waitForCount(connections, 2, 500);
+    const gap = connections[1] - connections[0];
+    assert(gap >= 40, `reconnect too fast: ${gap}ms`);
+    assert(gap < 250, `reconnect too slow: ${gap}ms`);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("a healthy relay that answers pings stays connected", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-liveness-healthy-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  let connections = 0;
+  relay.on("connection", () => {
+    connections += 1;
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    reconnectDelaysMs: [20],
+  });
+  try {
+    await waitForCount({ get length() { return connections; } }, 1, 500);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(connections, 1);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("accept-then-drop reconnects still back off up to 15 s", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-backoff-accept-drop-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  relay.on("connection", (socket) => {
+    connections.push(Date.now());
+    socket.close(4000, "replaced");
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 60_000,
+    pongDeadlineMs: 60_000,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: RECONNECT_DELAYS_MS,
+  });
+  try {
+    await waitForCount(connections, 6, 40_000);
+    const gaps = connections.slice(1).map((time, index) => time - connections[index]);
+    for (const [index, expected] of RECONNECT_DELAYS_MS.entries()) {
+      const gap = gaps[index];
+      assert(
+        gap >= expected - 250,
+        `accept-then-drop gap ${index} was ${gap}ms; expected at least ${expected}ms`,
+      );
+    }
+    assert(gaps[4] >= 14_000, `last accept-then-drop gap did not reach 15 s: ${gaps[4]}ms`);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+async function assertBackoffResetsAfterGrownHealth({
+  label,
+  autoPong,
+  pingIntervalMs,
+  pongDeadlineMs,
+  healthyUptimeMs,
+  onHealthy,
+  holdMs,
+}) {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-backoff-reset-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0, autoPong });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  const delays = [1_000, 4_000, 8_000];
+  relay.on("connection", (socket) => {
+    const record = { at: Date.now(), droppedAt: undefined, socket };
+    socket.once("close", () => {
+      record.droppedAt = Date.now();
+    });
+    connections.push(record);
+    if (connections.length <= 2) {
+      socket.close(4000, "replaced");
+      return;
+    }
+    if (connections.length === 3) {
+      onHealthy(socket, config);
+      return;
+    }
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs,
+    pongDeadlineMs,
+    healthyUptimeMs,
+    reconnectDelaysMs: delays,
+  });
+  try {
+    await waitForCount(connections, 4, 1_000 + 4_000 + holdMs + 4_000);
+    const grownGap = connections[2].at - connections[1].at;
+    const resetGap = connections[3].at - (connections[2].droppedAt ?? connections[2].at);
+    assert(grownGap >= 3_500, `${label}: backoff did not grow before health: ${grownGap}ms`);
+    assert(resetGap >= 800, `${label}: healthy drop reconnected too fast: ${resetGap}ms`);
+    assert(resetGap < 2_500, `${label}: healthy drop did not reset to 1 s: ${resetGap}ms`);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+}
+
+test("reconnect backoff resets to 1 s after a pong-only healthy connection", async () => {
+  await assertBackoffResetsAfterGrownHealth({
+    label: "pong-only",
+    autoPong: true,
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    healthyUptimeMs: 60_000,
+    holdMs: 200,
+    onHealthy: (socket) => {
+      socket.once("ping", () => {
+        setTimeout(() => socket.terminate(), 40);
+      });
+    },
+  });
+});
+
+test("reconnect backoff resets to 1 s after a valid-frame-only healthy connection", async () => {
+  await assertBackoffResetsAfterGrownHealth({
+    label: "valid-frame-only",
+    autoPong: false,
+    pingIntervalMs: 60_000,
+    pongDeadlineMs: 60_000,
+    healthyUptimeMs: 60_000,
+    holdMs: 200,
+    onHealthy: (socket, config) => {
+      socket.once("message", () => socket.terminate());
+      socket.send(
+        encryptFrame(
+          config,
+          "codex",
+          JSON.stringify({
+            v: 1,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "list_bots",
+            args: {},
+          }),
+        ),
+      );
+    },
+  });
+});
+
+test("reconnect backoff resets to 1 s after a 10 s uptime-only healthy connection", async () => {
+  await assertBackoffResetsAfterGrownHealth({
+    label: "uptime-only",
+    autoPong: false,
+    pingIntervalMs: 60_000,
+    pongDeadlineMs: 60_000,
+    healthyUptimeMs: RELAY_HEALTHY_UPTIME_MS,
+    holdMs: RELAY_HEALTHY_UPTIME_MS + 200,
+    onHealthy: (socket) => {
+      setTimeout(() => socket.terminate(), RELAY_HEALTHY_UPTIME_MS + 80);
+    },
+  });
+});
+
+test("relay socket close clears liveness timers without abort", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-liveness-close-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0, autoPong: false });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  relay.on("connection", (socket) => {
+    connections.push(socket);
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: [60_000],
+  });
+  try {
+    await waitForCount(connections, 1, 500);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert(livenessTimerCountForTests() > 0);
+    connections[0].close();
+    await once(connections[0], "close");
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(livenessTimerCountForTests(), 0);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("inbound traffic resets the pong deadline and close clears liveness timers", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-liveness-inbound-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0, autoPong: false });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const connections = [];
+  relay.on("connection", (socket) => {
+    connections.push(socket);
+    const keepAlive = setInterval(() => {
+      if (socket.readyState !== socket.OPEN) {
+        clearInterval(keepAlive);
+        return;
+      }
+      socket.send(
+        encryptFrame(
+          config,
+          "codex",
+          JSON.stringify({
+            v: 1,
+            id: randomUUID(),
+            issued_at_ms: Date.now(),
+            op: "list_bots",
+            args: {},
+          }),
+        ),
+      );
+    }, 20);
+    socket.on("close", () => clearInterval(keepAlive));
+  });
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: [20],
+  });
+  try {
+    await waitForCount(connections, 1, 500);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(connections.length, 1);
+    assert(livenessTimerCountForTests() > 0);
+    controller.abort();
+    await bridge;
+    const afterStop = connections.length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(connections.length, afterStop);
+    assert.equal(livenessTimerCountForTests(), 0);
+  } finally {
+    if (!controller.signal.aborted) controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("abort during a held CONNECTING handshake does not throw", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-abort-connecting-"));
+  const hanging = [];
+  const uncaught = [];
+  const onUncaught = (error) => {
+    uncaught.push(error);
+  };
+  process.on("uncaughtException", onUncaught);
+  const server = createServer();
+  server.on("upgrade", (_request, socket) => {
+    hanging.push(socket);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 60_000,
+    pongDeadlineMs: 60_000,
+    healthyUptimeMs: 60_000,
+    reconnectDelaysMs: [20],
+  });
+  try {
+    await waitForCount(hanging, 1, 500);
+    controller.abort();
+    await bridge;
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(uncaught.length, 0, uncaught[0]?.stack ?? uncaught[0]?.message);
+    assert.equal(livenessTimerCountForTests(), 0);
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    if (!controller.signal.aborted) controller.abort();
+    await Promise.race([bridge, new Promise((resolve) => setTimeout(resolve, 500))]);
+    for (const socket of hanging) socket.destroy();
+    await new Promise((resolve, reject) => {
+      server.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("reconnect backoff still increases when the handshake never completes", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-backoff-fail-"));
+  const upgrades = [];
+  const server = createServer();
+  server.on("upgrade", (_request, socket) => {
+    upgrades.push(Date.now());
+    socket.destroy();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const bridge = runBridge(config, idleBridgeClient(), controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 10_000,
+    pongDeadlineMs: 10_000,
+    reconnectDelaysMs: [30, 180, 400],
+  });
+  try {
+    await waitForCount(upgrades, 3, 800);
+    const firstGap = upgrades[1] - upgrades[0];
+    const secondGap = upgrades[2] - upgrades[1];
+    assert(firstGap < 120, `first failed reconnect waited too long: ${firstGap}ms`);
+    assert(secondGap >= 150, `failed reconnects did not back off: ${secondGap}ms`);
+  } finally {
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      server.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("a liveness disconnect during an in-flight send does not resend", async () => {
+  const replayRoot = await mkdtemp(join(tmpdir(), "codex-grok-liveness-inflight-"));
+  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0, autoPong: false });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert(address && typeof address === "object");
+  const config = parsePairCode(
+    generatePairCode(`ws://127.0.0.1:${address.port}/v1/connect`),
+  );
+  const controller = new AbortController();
+  const sends = [];
+  let releaseSend;
+  let markStarted;
+  const started = new Promise((resolve) => (markStarted = resolve));
+  const client = {
+    ...idleBridgeClient(),
+    sendPrompt: async (input) => {
+      sends.push(input);
+      markStarted();
+      return await new Promise((resolve) => (releaseSend = resolve));
+    },
+  };
+  const connections = [];
+  relay.on("connection", (socket) => connections.push(socket));
+  const bridge = runBridge(config, client, controller.signal, replayRoot, undefined, {}, {
+    pingIntervalMs: 40,
+    pongDeadlineMs: 40,
+    reconnectDelaysMs: [20],
+  });
+  try {
+    await waitForCount(connections, 1, 500);
+    connections[0].send(
+      encryptFrame(
+        config,
+        "codex",
+        JSON.stringify({
+          v: 1,
+          id: randomUUID(),
+          issued_at_ms: Date.now(),
+          op: "send_message",
+          args: { bot_id: "bot-1", message: "in flight" },
+        }),
+      ),
+    );
+    await started;
+    await waitForCount(connections, 2, 500);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(sends.length, 1);
+  } finally {
+    releaseSend?.({ accepted: true });
+    controller.abort();
+    await bridge;
+    await new Promise((resolve, reject) => {
+      relay.close((caught) => (caught ? reject(caught) : resolve()));
+    });
+    await rm(replayRoot, { recursive: true, force: true });
+  }
+});
+
+test("bridge errors carry GATEWAY_ENV_MISMATCH to Codex without leaking paths", async () => {
+  const secretPath = "/home/box/sand-data/gateway.json";
+  const result = await handleBridgeRequest(
+    {
+      listAgents: async () => {
+        throw new LocalGatewayError(
+          "CONFIG_INVALID",
+          0,
+          "",
+          "GATEWAY_ENV_MISMATCH",
+          "SAND_HOST_PORT does not match gateway.json",
+        );
+      },
+    },
+    {
+      v: 1,
+      id: randomUUID(),
+      issued_at_ms: Date.now(),
+      op: "list_bots",
+      args: {},
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "CONFIG_INVALID");
+  assert.equal(result.error.reason, "GATEWAY_ENV_MISMATCH");
+  assert.equal(result.error.request_id, undefined);
+  assert(!JSON.stringify(result).includes(secretPath));
+  assert(!JSON.stringify(result).includes("gateway-test-token"));
 });

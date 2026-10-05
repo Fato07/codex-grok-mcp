@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
@@ -28,6 +28,7 @@ import {
   hermetic,
   removeHermeticFixtureBase,
   scrubGatewayEnv,
+  spyChildEnv,
 } from "./hermetic-setup.mjs";
 import {
   BridgeLifecycle,
@@ -43,6 +44,7 @@ import {
 import {
   DEFAULT_GROK_BOT_DATA_ROOT,
   grokBotDataRoot,
+  sandUserDataDir,
   TestRealDataRootError,
 } from "../dist/grok-bot-client.js";
 import { runBridgeCompanion } from "../dist/bridge-companion.js";
@@ -237,6 +239,25 @@ async function assertBindingsAbsent(root, configPath) {
   await assert.rejects(lstat(`${configPath}.lifecycle.json`), { code: "ENOENT" });
 }
 
+async function assertNoStagingLeftovers(root) {
+  const names = await readdir(root).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  assert.deepEqual(
+    names.filter((name) => name.startsWith(".stage-")),
+    [],
+  );
+  const releaseNames = await readdir(join(root, "releases")).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  assert.deepEqual(
+    releaseNames.filter((name) => name.startsWith(".stage-")),
+    [],
+  );
+}
+
 async function runDefaultLifecycle(command, environment) {
   const moduleUrl = pathToFileURL(join(process.cwd(), "dist", "bridge-lifecycle.js")).href;
   const source = `
@@ -245,12 +266,12 @@ async function runDefaultLifecycle(command, environment) {
       const result = await new BridgeLifecycle().run(${JSON.stringify(command)});
       process.stdout.write(JSON.stringify({ ok: true, state: result.state }) + "\\n");
     } catch (error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: error?.message }) + "\\n");
+      process.stdout.write(JSON.stringify({ ok: false, error: error?.code ?? error?.message, message: error?.message }) + "\\n");
       process.exitCode = 1;
     }
   `;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-    env: environment,
+    env: spyChildEnv(environment),
     stdio: ["ignore", "pipe", "ignore"],
   });
   const output = [];
@@ -610,6 +631,12 @@ test("default lifecycle rejects config, replay, and Grok data beneath releases",
   const sentinel = join(releases, "keep.txt");
   await mkdir(releases, { recursive: true, mode: 0o700 });
   await writeFile(sentinel, "keep\n", { mode: 0o600 });
+  const defaultConfigDir = join(parent, "config", "codex-grok-mcp");
+  await mkdir(defaultConfigDir, { recursive: true, mode: 0o700 });
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    join(defaultConfigDir, "bridge.json"),
+  );
 
   for (const protectedKind of ["config", "replay", "grok-data"]) {
     const environment = {
@@ -622,6 +649,12 @@ test("default lifecycle rejects config, replay, and Grok data beneath releases",
     delete environment.SAND_USER_DATA_DIR;
     if (protectedKind === "config") {
       environment.XDG_CONFIG_HOME = join(releases, "config-home");
+      const configDir = join(environment.XDG_CONFIG_HOME, "codex-grok-mcp");
+      await mkdir(configDir, { recursive: true, mode: 0o700 });
+      await savePairingConfig(
+        parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+        join(configDir, "bridge.json"),
+      );
     } else if (protectedKind === "replay") {
       environment.XDG_STATE_HOME = join(releases, "state-home");
     } else {
@@ -629,7 +662,8 @@ test("default lifecycle rejects config, replay, and Grok data beneath releases",
     }
     const attempt = await runDefaultLifecycle("install", environment);
     assert.equal(attempt.code, 1);
-    assert.deepEqual(attempt.result, { ok: false, error: "lifecycle_state_invalid" });
+    assert.equal(attempt.result.ok, false);
+    assert.equal(attempt.result.error, "lifecycle_state_invalid");
     assert.equal(await readFile(sentinel, "utf8"), "keep\n");
   }
 });
@@ -1087,7 +1121,7 @@ for (const command of ["update", "rollback"]) {
   });
 }
 
-test("failed target start restores the retained release without publishing bindings", async (context) => {
+test("failed target start from stale leaves the retained release stopped without publishing bindings", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-stale-restore-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const configPath = join(root, "config", "bridge.json");
@@ -1098,34 +1132,20 @@ test("failed target start restores the retained release without publishing bindi
   controls.setCurrent(target);
   controls.setFailStart(target.version, "candidate_start_failed");
 
-  await assert.rejects(lifecycle.run("update"), { message: "update_failed_restored" });
-  assert.deepEqual(actions, [
-    `preflight:${target.version}`,
-    "recover-stale",
-    `start:${target.version}`,
-    `start:${retained.version}`,
-  ]);
-  await assertBindingsAbsent(root, configPath);
-  assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
-
-  controls.setStatus({
-    state: "stale",
-    managed: true,
-    companionVersion: retained.version,
-    protocolVersions: [...retained.protocol_versions],
-    releaseIntegrity: retained.integrity,
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
   });
-  actions.length = 0;
-  controls.setFailStart("*", "candidate_start_failed");
-  await assert.rejects(lifecycle.run("update"), { message: "restore_failed" });
   assert.deepEqual(actions, [
     `preflight:${target.version}`,
     "recover-stale",
     `start:${target.version}`,
-    `start:${retained.version}`,
   ]);
   await assertBindingsAbsent(root, configPath);
   assert.equal(await readFile(join(root, "state.json"), "utf8"), stateBefore);
+  await assertNoStagingLeftovers(root);
+  assert.equal((await lifecycle.run("status")).state, "stopped");
 });
 
 test("uncertain target start from stale publishes nothing", async (context) => {
@@ -1442,11 +1462,16 @@ test("a pre-activation failure restores the retained release exactly once", asyn
   context.after(() => rm(root, { recursive: true, force: true }));
   const { lifecycle, controls, actions } = harness(root);
   await lifecycle.run("install");
+  const stateBefore = await readFile(join(root, "state.json"));
   controls.setCurrent(release("0.2.0-beta.6", 2));
   controls.setFailStart("0.2.0-beta.6", "candidate_start_failed");
   const before = actions.length;
 
-  await assert.rejects(lifecycle.run("update"), { message: "update_failed_restored" });
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
   assert.deepEqual(actions.slice(before), [
     "preflight:0.2.0-beta.6",
     "stop",
@@ -1457,6 +1482,162 @@ test("a pre-activation failure restores the retained release exactly once", asyn
   assert.equal(status.state, "running");
   assert.equal(status.active_version, "0.2.0-beta.5");
   assert.equal(status.previous_version, null);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed update start from stopped leaves the retained release stopped", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-update-stopped-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  const retained = release("0.2.0-beta.5", 1);
+  const target = release("0.2.0-beta.6", 2);
+  await lifecycle.run("install");
+  await lifecycle.run("stop");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setCurrent(target);
+  controls.setFailStart(target.version, "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    `preflight:${target.version}`,
+    `start:${target.version}`,
+  ]);
+  const status = await lifecycle.run("status");
+  assert.equal(status.state, "stopped");
+  assert.equal(status.active_version, retained.version);
+  assert.equal(status.previous_version, null);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed rollback start from running restores the retained release", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-rollback-running-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  const previous = release("0.2.0-beta.5", 1);
+  const current = release("0.2.0-beta.6", 2);
+  await lifecycle.run("install");
+  controls.setCurrent(current);
+  await lifecycle.run("update");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setFailStart(previous.version, "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("rollback"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    `preflight:${previous.version}`,
+    "stop",
+    `start:${previous.version}`,
+    `start:${current.version}`,
+  ]);
+  const status = await lifecycle.run("status");
+  assert.equal(status.state, "running");
+  assert.equal(status.active_version, current.version);
+  assert.equal(status.previous_version, previous.version);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed rollback start from stopped leaves the retained release stopped", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-rollback-stopped-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  const previous = release("0.2.0-beta.5", 1);
+  const current = release("0.2.0-beta.6", 2);
+  await lifecycle.run("install");
+  controls.setCurrent(current);
+  await lifecycle.run("update");
+  await lifecycle.run("stop");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setFailStart(previous.version, "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("rollback"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "update_failed_restored");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    `preflight:${previous.version}`,
+    `start:${previous.version}`,
+  ]);
+  const status = await lifecycle.run("status");
+  assert.equal(status.state, "stopped");
+  assert.equal(status.active_version, current.version);
+  assert.equal(status.previous_version, previous.version);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("a failed restore start from running still returns restore_failed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-restore-failed-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls, actions } = harness(root);
+  await lifecycle.run("install");
+  const stateBefore = await readFile(join(root, "state.json"));
+  controls.setCurrent(release("0.2.0-beta.6", 2));
+  controls.setFailStart("*", "candidate_start_failed");
+  const before = actions.length;
+
+  await assert.rejects(lifecycle.run("update"), (error) => {
+    assert(error instanceof BridgeLifecycleError);
+    assert.equal(error.code, "restore_failed");
+    return true;
+  });
+  assert.deepEqual(actions.slice(before), [
+    "preflight:0.2.0-beta.6",
+    "stop",
+    "start:0.2.0-beta.6",
+    "start:0.2.0-beta.5",
+  ]);
+  assert.deepEqual(await readFile(join(root, "state.json")), stateBefore);
+  await assertNoStagingLeftovers(root);
+});
+
+test("install before pairing fails with PAIRING_REQUIRED and writes nothing", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-grok-pairing-required-"));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const dataHome = join(parent, "data");
+  const configHome = join(parent, "config");
+  const environment = {
+    ...process.env,
+    XDG_DATA_HOME: dataHome,
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: join(parent, "state"),
+    SAND_DATA_ROOT: join(parent, "sand-data"),
+  };
+  delete environment.SAND_USER_DATA_DIR;
+
+  const attempt = await runDefaultLifecycle("install", environment);
+  assert.equal(attempt.code, 1);
+  assert.equal(attempt.result.ok, false);
+  assert.equal(attempt.result.error, "PAIRING_REQUIRED");
+  assert.match(attempt.result.message, /pair first/i);
+  assert.deepEqual(await readdir(parent), []);
+
+  const root = join(dataHome, "codex-grok-mcp", "companion");
+  const configPath = join(configHome, "codex-grok-mcp", "bridge.json");
+  await assert.rejects(lstat(join(root, "releases")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "binding.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "state.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(root, "lifecycle-control")), { code: "ENOENT" });
+  await assert.rejects(lstat(`${join(root, "lifecycle-control")}.lock`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle.json`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lock`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle-control`), { code: "ENOENT" });
+  await assert.rejects(lstat(`${configPath}.lifecycle-control.lock`), { code: "ENOENT" });
+  await assert.rejects(lstat(companionLeasePath(configPath)), { code: "ENOENT" });
+  await assertNoStagingLeftovers(root);
 });
 
 test("an ambiguous activation never triggers an automatic second cutover", async (context) => {
@@ -3059,10 +3240,8 @@ function pinnedManagedChildEnvironment(extra) {
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }
-  const sandUserDataDirectory = process.env.SAND_USER_DATA_DIR;
-  if (sandUserDataDirectory !== undefined && sandUserDataDirectory.trim() !== "") {
-    environment.SAND_USER_DATA_DIR = resolve(sandUserDataDirectory);
-  }
+  const userRoot = sandUserDataDir(process.env);
+  if (userRoot !== undefined) environment.SAND_USER_DATA_DIR = userRoot;
   return { ...environment, ...extra };
 }
 
@@ -3086,15 +3265,24 @@ test("managed child environment without the hermetic flag is byte-identical to t
   assert.deepEqual(Object.keys(child).sort(), Object.keys(pinned).sort());
 });
 
+test("managed child environment trims SAND_USER_DATA_DIR the same way as grokBotDataRoot", (context) => {
+  context.after(() => applyHermeticEnv());
+  process.env.SAND_USER_DATA_DIR = `  ${hermetic.base}  `;
+  const child = managedChildEnvironment({ CODEX_GROK_MANAGED_CONFIG_PATH: "managed" });
+  assert.equal(child.SAND_USER_DATA_DIR, hermetic.base);
+});
+
 test("managed child environment forwards the hermetic flag only when the parent has it", (context) => {
   context.after(() => applyHermeticEnv());
   const extra = { CODEX_GROK_MANAGED_CONFIG_PATH: "managed" };
   process.env.CODEX_GROK_TEST_HERMETIC = "1";
   const withFlag = managedChildEnvironment(extra);
   assert.equal(withFlag.CODEX_GROK_TEST_HERMETIC, "1");
+  assert.equal(Object.hasOwn(withFlag, "NODE_OPTIONS"), false);
   delete process.env.CODEX_GROK_TEST_HERMETIC;
   const withoutFlag = managedChildEnvironment(extra);
   assert.equal(Object.hasOwn(withoutFlag, "CODEX_GROK_TEST_HERMETIC"), false);
+  assert.equal(Object.hasOwn(withoutFlag, "NODE_OPTIONS"), false);
 });
 
 test("managed child with hermetic flag and real root fails before any read or connect", async () => {
@@ -3133,7 +3321,7 @@ test("managed child with hermetic flag and real root fails before any read or co
     }
   `;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-    env: { PATH: process.env.PATH, ...childEnv },
+    env: spyChildEnv({ PATH: process.env.PATH, ...childEnv }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];
@@ -3173,7 +3361,7 @@ test("hermetic setup removes its fixture base on process exit", async () => {
   const childEnv = { ...process.env };
   delete childEnv.CODEX_GROK_TEST_HERMETIC;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
-    env: childEnv,
+    env: spyChildEnv(childEnv),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];

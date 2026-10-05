@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 import { GROK_MODELS } from "../dist/schema.js";
 import { CODEX_GROK_VERSION } from "../dist/version.js";
@@ -182,4 +189,103 @@ test("documented Grok models match the shared finite tuple", async () => {
     [...row[2].matchAll(/`([^`]+)`/g)].map((match) => match[1]),
     [...GROK_MODELS],
   );
+});
+
+test("npm pack excludes attachment test-hooks files", async () => {
+  const repo = fileURLToPath(new URL("..", import.meta.url));
+  const sourceDist = join(repo, "dist");
+  const distMtimes = async (dir) => {
+    const names = (await readdir(dir)).sort();
+    const times = {};
+    for (const name of names) times[name] = (await stat(join(dir, name))).mtimeMs;
+    return times;
+  };
+  const before = await distMtimes(sourceDist);
+  const dest = await mkdtemp(join(tmpdir(), "codex-grok-pack-"));
+  try {
+    const pkgDir = join(dest, "src-pkg");
+    const packed = JSON.parse(await readFile(join(repo, "package.json"), "utf8"));
+    delete packed.scripts?.prepublishOnly;
+    const packedDist = join(pkgDir, "dist");
+    await mkdir(packedDist, { recursive: true });
+    for (const name of Object.keys(before)) {
+      await writeFile(join(packedDist, name), await readFile(join(sourceDist, name)));
+    }
+    await writeFile(join(pkgDir, "package.json"), `${JSON.stringify(packed, null, 2)}\n`);
+    const { stdout } = await execFileAsync(
+      "npm",
+      ["pack", "--json", "--ignore-scripts", `--pack-destination=${dest}`],
+      {
+        cwd: pkgDir,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TMPDIR: process.env.TMPDIR,
+          INIT_CWD: pkgDir,
+          npm_config_update_notifier: "false",
+          npm_config_ignore_scripts: "true",
+        },
+      },
+    );
+    const packs = JSON.parse(stdout);
+    const files = packs[0]?.files?.map((entry) => entry.path) ?? [];
+    assert.equal(
+      files.some((path) => path.includes("test-hooks")),
+      false,
+      `published files include test-hooks: ${files.filter((path) => path.includes("test-hooks")).join(", ")}`,
+    );
+    const tarball = join(dest, packs[0].filename);
+    await execFileAsync("tar", ["-xzf", tarball, "-C", dest]);
+    const distDir = join(dest, "package", "dist");
+    const distFiles = await readdir(distDir);
+    const allowedTestEnv = (name) =>
+      name.startsWith("grok-bot-client.") || name.startsWith("bridge-lifecycle.");
+    const hits = [];
+    for (const name of distFiles) {
+      const text = await readFile(join(distDir, name), "utf8");
+      if (text.includes("Symbol.for")) hits.push(`${name}: Symbol.for`);
+      if (text.includes("test-hooks")) hits.push(`${name}: test-hooks`);
+      if (text.includes("resetAttachmentSessionStore")) {
+        hits.push(`${name}: resetAttachmentSessionStore`);
+      }
+      if (text.includes("CODEX_GROK_TEST_") && allowedTestEnv(name) === false) {
+        hits.push(`${name}: CODEX_GROK_TEST_`);
+      }
+    }
+    assert.deepEqual(hits, []);
+    const packedText = Object.fromEntries(
+      await Promise.all(distFiles.map(async (name) => [name, await readFile(join(distDir, name), "utf8")])),
+    );
+    const sandRootFiles = distFiles.filter((name) => packedText[name].includes("sandRoots"));
+    assert.deepEqual(
+      sandRootFiles.filter((name) => name.startsWith("attachments.") === false),
+      [],
+      `sandRoots leaked outside attachments: ${sandRootFiles.join(", ")}`,
+    );
+    for (const name of ["index.js", "bridge-companion.js"]) {
+      const text = packedText[name];
+      assert.equal(text.includes("sandRoots"), false, `${name} exposes sandRoots`);
+      assert.equal(text.includes("attachmentGuard"), false, `${name} exposes attachmentGuard`);
+      assert.equal(text.includes("homes:"), false, `${name} exposes homes override`);
+    }
+    const gateway = packedText["grok-bot-gateway.js"];
+    assert.equal(gateway.includes("sandRoots"), false, "grok-bot-gateway.js exposes sandRoots");
+    assert.equal(gateway.includes("homes:"), false, "grok-bot-gateway.js exposes homes override");
+    assert.equal(
+      files.some((path) => path.includes("real-root-fs-spy")),
+      false,
+      "packed files include real-root-fs-spy",
+    );
+    for (const name of distFiles) {
+      assert.equal(
+        packedText[name].includes("real-root-fs-spy"),
+        false,
+        `${name} mentions real-root-fs-spy`,
+      );
+    }
+    assert.deepEqual(await distMtimes(sourceDist), before);
+  } finally {
+    await rm(dest, { recursive: true, force: true });
+  }
 });

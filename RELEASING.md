@@ -29,7 +29,7 @@ Record one immutable identity before testing:
 
 Each dependency must be complete, included where applicable in the final candidate, and linked from the evidence record.
 
-- [ ] [#4, one-command companion lifecycle and safe upgrade](https://github.com/Fato07/codex-grok-mcp/issues/4): exact-version install, status, update, restart, and rollback preserve pairing and recover the prior version after failure.
+- [ ] [#4, one-command companion lifecycle and safe upgrade](https://github.com/Fato07/codex-grok-mcp/issues/4): exact-version install, status, update, restart, and rollback preserve pairing and recover the prior version and run state after failure.
 - [ ] [#5, clean install, upgrade, rollback, and uninstall](https://github.com/Fato07/codex-grok-mcp/issues/5): a clean Codex host and Grok Bot VM pass the full lifecycle with redacted receipts.
 - [ ] [#6, reconnect, restart, and gateway-rotation soak](https://github.com/Fato07/codex-grok-mcp/issues/6): recovery is bounded, post-dispatch ambiguity remains `outcome_unknown`, and sends are not retried.
 - [ ] [#7, invalid-pairing diagnostics](https://github.com/Fato07/codex-grok-mcp/issues/7): wrong-key failures are distinct from `UPGRADE_REQUIRED`, sanitized, and covered by the full suites.

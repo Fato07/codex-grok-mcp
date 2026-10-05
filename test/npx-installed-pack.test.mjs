@@ -3,12 +3,47 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { test } from "node:test";
 import { applyHermeticEnv, hermetic, scrubGatewayEnv } from "./hermetic-setup.mjs";
+import {
+  generatePairCode,
+  parsePairCode,
+  savePairingConfig,
+} from "../dist/bridge-pairing.js";
 import { CODEX_GROK_VERSION } from "../dist/version.js";
+
+async function fingerprintTree(root) {
+  const files = [];
+  async function walk(dir, rel = "") {
+    const entries = (await readdir(dir, { withFileTypes: true })).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+    for (const entry of entries) {
+      const nextRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(path, nextRel);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const bytes = await readFile(path);
+      const details = await lstat(path);
+      files.push({
+        path: nextRel,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.length,
+        ino: details.ino,
+        mtimeMs: details.mtimeMs,
+        ctimeMs: details.ctimeMs,
+      });
+    }
+  }
+  await walk(root);
+  return files;
+}
 
 function runNpm(args, options) {
   const result = spawnSync("npm", args, {
@@ -197,8 +232,24 @@ test("npx offline tarball install gets past the candidate pack check", async (co
     await mkdir(directory, { recursive: true, mode: 0o700 });
   }
 
+  const repoDist = resolve("dist");
+  const distBeforePack = await fingerprintTree(repoDist);
   const packed = JSON.parse(
-    runNpm(["pack", "--json", "--pack-destination", packDest], { cwd: process.cwd() }).stdout,
+    runNpm(["pack", "--json", "--ignore-scripts", "--pack-destination", packDest], {
+      cwd: process.cwd(),
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        INIT_CWD: packDest,
+        npm_config_update_notifier: "false",
+      },
+    }).stdout,
+  );
+  assert.deepEqual(
+    await fingerprintTree(repoDist),
+    distBeforePack,
+    "npm pack rewrote repository dist/",
   );
   assert.equal(packed.length, 1);
   const tarball = join(packDest, packed[0].filename);
@@ -242,6 +293,13 @@ test("npx offline tarball install gets past the candidate pack check", async (co
   childEnv.npm_config_ignore_scripts = "true";
   childEnv.npm_config_update_notifier = "false";
 
+  const pairingDir = join(configHome, "codex-grok-mcp");
+  await mkdir(pairingDir, { recursive: true, mode: 0o700 });
+  await savePairingConfig(
+    parsePairCode(generatePairCode("ws://127.0.0.1:9/v1/connect")),
+    join(pairingDir, "bridge.json"),
+  );
+
   const child = spawn(
     "npx",
     ["--yes", "--offline", `--package=${tarball}`, "--", "codex-grok-bridge", "install"],
@@ -272,9 +330,16 @@ test("npx offline tarball install gets past the candidate pack check", async (co
       .find((line) => line.startsWith("{")) ?? "null",
   );
   assert.equal(typeof report?.error, "string", combined);
+  assert.notEqual(report.error, "PAIRING_REQUIRED", combined);
   assert.notEqual(
     report.error,
     "install_failed",
     `pack check still failed as install_failed; output=${combined}`,
+  );
+  assert.equal(report.error, "candidate_invalid", combined);
+  assert.deepEqual(
+    await fingerprintTree(repoDist),
+    distBeforePack,
+    "npx install rewrote repository dist/",
   );
 });

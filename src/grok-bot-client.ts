@@ -1,12 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 
 export const DEFAULT_GROK_BOT_DATA_ROOT = "/home/box/sand-data";
-const LEGACY_GROK_BOT_DATA_ROOT = "/home/box/agent-data";
+export const LEGACY_GROK_BOT_DATA_ROOT = "/home/box/agent-data";
+export const GROK_BOT_DATA_ROOTS = Object.freeze([
+  DEFAULT_GROK_BOT_DATA_ROOT,
+  LEGACY_GROK_BOT_DATA_ROOT,
+]);
 const DEFAULT_SAND_ROOT = DEFAULT_GROK_BOT_DATA_ROOT;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -98,7 +102,34 @@ export type LocalSendPromptInput = {
   agentId: string;
   prompt: string;
   clientNonce: string;
+  attachmentPaths?: string[];
+  attachmentNames?: string[];
 };
+
+const hostStatusSchema = z
+  .object({
+    hostVersion: z.string().min(1).max(64),
+    latestHostVersion: z.string().max(64).optional(),
+    hostUpdateAvailable: z.boolean().optional(),
+    isBusy: z.boolean().optional(),
+    capabilities: z.array(z.string().max(128)).max(32).optional(),
+  })
+  .passthrough();
+
+const uploadAttachmentResultSchema = z.object({ path: z.string().min(1).max(4_096) }).passthrough();
+
+const attachmentChunkSchema = z
+  .object({
+    bytesBase64: z.string(),
+    totalSize: z.number().int().nonnegative(),
+    mime: z.string().max(128).nullable(),
+    resolvedName: z.string().max(512).optional(),
+  })
+  .passthrough();
+
+export type LocalHostStatus = z.infer<typeof hostStatusSchema>;
+export type LocalUploadAttachmentResult = z.infer<typeof uploadAttachmentResultSchema>;
+export type LocalAttachmentChunk = z.infer<typeof attachmentChunkSchema>;
 
 export type LocalGatewayErrorCode =
   | "AUTH_FAILED"
@@ -187,26 +218,10 @@ function readPort(value: string | undefined): number | undefined {
   return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
 }
 
-function existingRealpath(path: string): string | undefined {
-  try {
-    return realpathSync(path);
-  } catch {
-    return undefined;
-  }
-}
-
-function realGrokBotDataRoots(): string[] {
-  const roots = new Set<string>();
-  for (const candidate of [DEFAULT_GROK_BOT_DATA_ROOT, LEGACY_GROK_BOT_DATA_ROOT]) {
-    roots.add(resolve(candidate));
-    const real = existingRealpath(candidate);
-    if (real !== undefined) roots.add(real);
-  }
-  return [...roots];
-}
-
-function isRealGrokBotDataRoot(resolved: string): boolean {
-  for (const forbidden of realGrokBotDataRoots()) {
+export function isLexicalGrokBotDataRootPath(path: string): boolean {
+  const resolved = resolve(path);
+  for (const candidate of GROK_BOT_DATA_ROOTS) {
+    const forbidden = resolve(candidate);
     if (
       resolved === forbidden ||
       resolved === `${forbidden}${sep}` ||
@@ -224,21 +239,35 @@ function testRealDataRootGuardActive(): boolean {
 
 export function assertNotRealGrokBotDataRoot(root: string): void {
   if (!testRealDataRootGuardActive()) return;
-  const resolved = existingRealpath(root) ?? resolve(root);
-  if (isRealGrokBotDataRoot(resolved)) throw new TestRealDataRootError();
+  if (isLexicalGrokBotDataRootPath(root)) throw new TestRealDataRootError();
+}
+
+export function sandUserDataDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const value = env.SAND_USER_DATA_DIR?.trim();
+  if (value === undefined || value === "") return undefined;
+  return isAbsolute(value) ? value : resolve(value);
+}
+
+export function candidateGrokBotDataRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const roots = new Set<string>(GROK_BOT_DATA_ROOTS);
+  if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
+    roots.add(env.SAND_DATA_ROOT);
+  }
+  const userRoot = sandUserDataDir(env);
+  if (userRoot !== undefined) {
+    roots.add(join(userRoot, "sand-data"));
+    roots.add(join(userRoot, "agent-data"));
+  }
+  return [...roots];
 }
 
 export function grokBotDataRoot(env: NodeJS.ProcessEnv = process.env): string {
   let root: string;
   if (env.SAND_DATA_ROOT !== undefined && isAbsolute(env.SAND_DATA_ROOT)) {
     root = env.SAND_DATA_ROOT;
-  } else if (env.SAND_USER_DATA_DIR !== undefined && env.SAND_USER_DATA_DIR.trim() !== "") {
-    const userRoot = isAbsolute(env.SAND_USER_DATA_DIR)
-      ? env.SAND_USER_DATA_DIR
-      : resolve(env.SAND_USER_DATA_DIR);
-    root = join(userRoot, "sand-data");
   } else {
-    root = DEFAULT_SAND_ROOT;
+    const userRoot = sandUserDataDir(env);
+    root = userRoot === undefined ? DEFAULT_SAND_ROOT : join(userRoot, "sand-data");
   }
   assertNotRealGrokBotDataRoot(root);
   return root;
@@ -249,29 +278,30 @@ function assertGatewayEnvMatchesDiscovery(
   file: z.infer<typeof discoveryFileSchema> | undefined,
 ): void {
   if (file === undefined) return;
+  const mismatches: string[] = [];
   const envPort = readPort(env.SAND_HOST_PORT);
   if (envPort !== undefined && envPort !== file.port) {
-    throw new LocalGatewayError(
-      "CONFIG_INVALID",
-      0,
-      "",
-      "GATEWAY_ENV_MISMATCH",
-      "SAND_HOST_PORT does not match gateway.json",
-    );
+    mismatches.push("SAND_HOST_PORT");
   }
   const envHost = env.SAND_GATEWAY_BIND_HOST?.trim();
   if (envHost !== undefined && envHost !== "") {
     const fileHost = file.host?.trim() ?? "127.0.0.1";
     if (normalizeGatewayHost(envHost) !== normalizeGatewayHost(fileHost)) {
-      throw new LocalGatewayError(
-        "CONFIG_INVALID",
-        0,
-        "",
-        "GATEWAY_ENV_MISMATCH",
-        "SAND_GATEWAY_BIND_HOST does not match gateway.json",
-      );
+      mismatches.push("SAND_GATEWAY_BIND_HOST");
     }
   }
+  if (mismatches.length === 0) return;
+  const which =
+    mismatches.length === 2
+      ? "SAND_HOST_PORT and SAND_GATEWAY_BIND_HOST"
+      : mismatches[0]!;
+  throw new LocalGatewayError(
+    "CONFIG_INVALID",
+    0,
+    "",
+    "GATEWAY_ENV_MISMATCH",
+    `${which} does not match gateway.json`,
+  );
 }
 
 function readDiscovery(path: string): z.infer<typeof discoveryFileSchema> | undefined {
@@ -538,9 +568,61 @@ export class LocalGrokBotClient {
         agentId: input.agentId,
         prompt: input.prompt,
         clientNonce: input.clientNonce,
+        ...(input.attachmentPaths === undefined ? {} : { attachmentPaths: input.attachmentPaths }),
+        ...(input.attachmentNames === undefined ? {} : { attachmentNames: input.attachmentNames }),
       },
       true,
       sendResultSchema,
+    );
+  }
+
+  async getHostStatus(
+    input: { includeManagedCapabilities?: boolean } = {},
+  ): Promise<LocalHostStatus> {
+    return await this.#request(
+      "POST",
+      "/api/getHostStatus",
+      input.includeManagedCapabilities === true ? { includeManagedCapabilities: true } : {},
+      true,
+      hostStatusSchema,
+    );
+  }
+
+  async uploadAttachment(input: {
+    agentId: string;
+    filename: string;
+    bytesBase64: string;
+  }): Promise<LocalUploadAttachmentResult> {
+    return await this.#request(
+      "POST",
+      "/api/uploadAttachment",
+      {
+        agentId: input.agentId,
+        filename: input.filename,
+        bytesBase64: input.bytesBase64,
+      },
+      true,
+      uploadAttachmentResultSchema,
+    );
+  }
+
+  async readAttachmentChunk(input: {
+    agentId: string;
+    path: string;
+    offset: number;
+    length: number;
+  }): Promise<LocalAttachmentChunk | null> {
+    return await this.#request(
+      "POST",
+      "/api/readAttachmentChunk",
+      {
+        agentId: input.agentId,
+        path: input.path,
+        offset: input.offset,
+        length: input.length,
+      },
+      true,
+      z.union([z.null(), attachmentChunkSchema]),
     );
   }
 

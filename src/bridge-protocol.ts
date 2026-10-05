@@ -1,7 +1,10 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { MAX_PROMPT_BYTES } from "./schema.js";
-import { BRIDGE_STATUS_PROTOCOL_VERSION } from "./version.js";
+import {
+  BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+  BRIDGE_STATUS_PROTOCOL_VERSION,
+} from "./version.js";
 
 const MAX_ROSTER_BOTS = 500;
 export const MAX_READ_BOT_MESSAGES = 50;
@@ -66,8 +69,31 @@ export const bridgeReadSnapshotSchema = z
     `Read snapshot must not exceed ${MAX_READ_SNAPSHOT_BYTES} UTF-8 bytes`,
   );
 
+export const bridgeAttachmentMetaSchema = z
+  .object({
+    entry_id: z.string().trim().min(1).max(512),
+    seq: z.number().int().nonnegative().safe().nullable(),
+    speaker: z.enum(["user", "bot", "peer"]),
+    name: z.string().trim().min(1).max(255),
+    kind: z.enum(["text", "image", "pdf", "binary", "external"]),
+    size: z.number().int().nonnegative().safe().optional(),
+    timestamp_ms: z.number().int().nonnegative().safe().nullable(),
+  })
+  .strict();
+
+export const bridgeReadSnapshotV4Schema = bridgeReadSnapshotSchema
+  .safeExtend({
+    attachments: z.array(bridgeAttachmentMetaSchema).max(MAX_READ_BOT_MESSAGES),
+  })
+  .refine(
+    (value) => Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_READ_SNAPSHOT_BYTES,
+    `Read snapshot must not exceed ${MAX_READ_SNAPSHOT_BYTES} UTF-8 bytes`,
+  );
+
 export type BridgeReadMessage = z.infer<typeof bridgeReadMessageSchema>;
 export type BridgeReadSnapshot = z.infer<typeof bridgeReadSnapshotSchema>;
+export type BridgeAttachmentMeta = z.infer<typeof bridgeAttachmentMetaSchema>;
+export type BridgeReadSnapshotV4 = z.infer<typeof bridgeReadSnapshotV4Schema>;
 
 const bridgeCapabilitySchema = z
   .string()
@@ -285,6 +311,9 @@ export function createBridgeReadSnapshot(input: {
   return bridgeReadSnapshotSchema.parse(snapshot());
 }
 
+const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const attachmentRefSchema = z.string().uuid();
+
 export const bridgeRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
@@ -306,7 +335,7 @@ export const bridgeRequestSchema = z.discriminatedUnion("op", [
     .strict(),
   z
     .object({
-      v: z.literal(2),
+      v: z.union([z.literal(2), z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION)]),
       id: rpcIdSchema,
       issued_at_ms: z.number().int().nonnegative(),
       op: z.literal("read_bot"),
@@ -321,7 +350,7 @@ export const bridgeRequestSchema = z.discriminatedUnion("op", [
     .strict(),
   z
     .object({
-      v: z.literal(1),
+      v: z.union([z.literal(1), z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION)]),
       id: rpcIdSchema,
       issued_at_ms: z.number().int().nonnegative(),
       op: z.literal("send_message"),
@@ -329,6 +358,65 @@ export const bridgeRequestSchema = z.discriminatedUnion("op", [
         .object({
           bot_id: botIdSchema,
           message: messageSchema,
+          attachment_refs: z.tuple([attachmentRefSchema]).optional(),
+        })
+        .strict(),
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.args.attachment_refs === undefined
+          ? value.v === 1
+          : value.v === BRIDGE_ATTACHMENT_PROTOCOL_VERSION,
+      "attachment_refs require bridge protocol v4",
+    ),
+  z
+    .object({
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      issued_at_ms: z.number().int().nonnegative(),
+      op: z.literal("attachment_stage"),
+      args: z
+        .object({
+          upload_id: rpcIdSchema,
+          bot_id: botIdSchema,
+          name: z.string().trim().min(1).max(255),
+          mime: z.string().trim().min(1).max(128),
+          total_size: z.number().int().positive().max(2 * 1024 * 1024),
+          sha256: sha256HexSchema,
+          seq: z.number().int().nonnegative().safe(),
+          offset: z.number().int().nonnegative().safe(),
+          bytes_b64: z.string().min(1).max(87_384),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      issued_at_ms: z.number().int().nonnegative(),
+      op: z.literal("attachment_commit"),
+      args: z
+        .object({
+          upload_id: rpcIdSchema,
+          bot_id: botIdSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      issued_at_ms: z.number().int().nonnegative(),
+      op: z.literal("attachment_fetch"),
+      args: z
+        .object({
+          bot_id: botIdSchema,
+          entry_id: z.string().trim().min(1).max(512),
+          offset: z.number().int().nonnegative().safe(),
+          length: z.number().int().positive().max(64 * 1024),
         })
         .strict(),
     })
@@ -336,6 +424,10 @@ export const bridgeRequestSchema = z.discriminatedUnion("op", [
 ]);
 
 export const bridgeErrorCodeSchema = z.enum([
+  "ATTACHMENT_INTEGRITY",
+  "ATTACHMENT_REJECTED",
+  "ATTACHMENT_STALE",
+  "ATTACHMENT_TOO_LARGE",
   "AUTH_FAILED",
   "BOT_NOT_FOUND",
   "CANCELLED",
@@ -351,11 +443,43 @@ export const bridgeErrorCodeSchema = z.enum([
   "UPGRADE_REQUIRED",
 ]);
 
+export const bridgeErrorReasonSchema = z.enum(["GATEWAY_ENV_MISMATCH"]);
+
 const bridgeErrorSchema = z
   .object({
     code: bridgeErrorCodeSchema,
     delivery_may_have_occurred: z.boolean(),
+    commit_may_have_occurred: z.boolean().optional(),
     request_id: z.string().min(1).max(512).optional(),
+    reason: bridgeErrorReasonSchema.optional(),
+  })
+  .strict();
+
+export const bridgeAttachmentStageResultSchema = z
+  .object({
+    state: z.literal("staged"),
+    upload_id: rpcIdSchema,
+    received_bytes: z.number().int().nonnegative(),
+    total_size: z.number().int().positive(),
+    complete: z.boolean(),
+  })
+  .strict();
+
+export const bridgeAttachmentCommitResultSchema = z
+  .object({
+    state: z.literal("committed"),
+    attachment_ref: attachmentRefSchema,
+  })
+  .strict();
+
+export const bridgeAttachmentFetchResultSchema = z
+  .object({
+    bytes_b64: z.string().min(1),
+    total_size: z.number().int().nonnegative(),
+    sha256: sha256HexSchema,
+    mime: z.string().min(1).max(128),
+    name: z.string().min(1).max(255),
+    truncated: z.boolean(),
   })
   .strict();
 
@@ -389,7 +513,16 @@ export const bridgeResponseSchema = z.union([
     .strict(),
   z
     .object({
-      v: z.literal(1),
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      op: z.literal("read_bot"),
+      ok: z.literal(true),
+      result: bridgeReadSnapshotV4Schema,
+    })
+    .strict(),
+  z
+    .object({
+      v: z.union([z.literal(1), z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION)]),
       id: rpcIdSchema,
       op: z.literal("send_message"),
       ok: z.literal(true),
@@ -403,7 +536,39 @@ export const bridgeResponseSchema = z.union([
     .strict(),
   z
     .object({
-      v: z.union([z.literal(1), z.literal(2), z.literal(BRIDGE_STATUS_PROTOCOL_VERSION)]),
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      op: z.literal("attachment_stage"),
+      ok: z.literal(true),
+      result: bridgeAttachmentStageResultSchema,
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      op: z.literal("attachment_commit"),
+      ok: z.literal(true),
+      result: bridgeAttachmentCommitResultSchema,
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      id: rpcIdSchema,
+      op: z.literal("attachment_fetch"),
+      ok: z.literal(true),
+      result: bridgeAttachmentFetchResultSchema,
+    })
+    .strict(),
+  z
+    .object({
+      v: z.union([
+        z.literal(1),
+        z.literal(2),
+        z.literal(BRIDGE_STATUS_PROTOCOL_VERSION),
+        z.literal(BRIDGE_ATTACHMENT_PROTOCOL_VERSION),
+      ]),
       id: rpcIdSchema,
       ok: z.literal(false),
       error: bridgeErrorSchema,
@@ -414,3 +579,4 @@ export const bridgeResponseSchema = z.union([
 export type BridgeRequest = z.infer<typeof bridgeRequestSchema>;
 export type BridgeResponse = z.infer<typeof bridgeResponseSchema>;
 export type BridgeErrorCode = z.infer<typeof bridgeErrorCodeSchema>;
+export type BridgeErrorReason = z.infer<typeof bridgeErrorReasonSchema>;

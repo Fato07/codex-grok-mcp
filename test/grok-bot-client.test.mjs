@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_GROK_BOT_DATA_ROOT,
+  GROK_BOT_DATA_ROOTS,
+  LEGACY_GROK_BOT_DATA_ROOT,
+  candidateGrokBotDataRoots,
   grokBotDataRoot,
   LocalGatewayError,
   LocalGrokBotClient,
@@ -542,6 +545,7 @@ test("env port or bind host that disagrees with gateway.json is a named mismatch
       assert.equal(caught.code, "CONFIG_INVALID");
       assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
       assert.match(caught.message, /SAND_HOST_PORT/);
+      assert.doesNotMatch(caught.message, /SAND_GATEWAY_BIND_HOST/);
       return true;
     },
   );
@@ -556,6 +560,23 @@ test("env port or bind host that disagrees with gateway.json is a named mismatch
       assert(caught instanceof LocalGatewayError);
       assert.equal(caught.code, "CONFIG_INVALID");
       assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+      assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
+      assert.doesNotMatch(caught.message, /SAND_HOST_PORT/);
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      new LocalGrokBotClient({
+        discoveryPath,
+        env: { SAND_HOST_PORT: "1340", SAND_GATEWAY_BIND_HOST: "10.0.0.1" },
+        verifyServer: () => true,
+      }),
+    (caught) => {
+      assert(caught instanceof LocalGatewayError);
+      assert.equal(caught.code, "CONFIG_INVALID");
+      assert.equal(caught.reason, "GATEWAY_ENV_MISMATCH");
+      assert.match(caught.message, /SAND_HOST_PORT/);
       assert.match(caught.message, /SAND_GATEWAY_BIND_HOST/);
       return true;
     },
@@ -628,7 +649,49 @@ test("with the hermetic flag the real root throws TestRealDataRootError", () => 
       () => grokBotDataRoot({ SAND_DATA_ROOT: DEFAULT_GROK_BOT_DATA_ROOT }),
       (caught) => caught instanceof TestRealDataRootError,
     );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: `${DEFAULT_GROK_BOT_DATA_ROOT}/./` }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
+    assert.throws(
+      () => grokBotDataRoot({ SAND_DATA_ROOT: join(DEFAULT_GROK_BOT_DATA_ROOT, "..", "sand-data") }),
+      (caught) => caught instanceof TestRealDataRootError,
+    );
   });
   assert.equal(captured.stderr, "");
   assert.equal(captured.exitCode, process.exitCode);
+});
+
+test("candidate Sand roots include every env derivation plus the fixed defaults", () => {
+  const user = join(tmpdir(), "codex-grok-user-data");
+  const dataRoot = join(tmpdir(), "codex-grok-data-root");
+  assert.deepEqual(candidateGrokBotDataRoots({}), [...GROK_BOT_DATA_ROOTS]);
+  assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_DATA_ROOT: dataRoot })),
+    new Set([...GROK_BOT_DATA_ROOTS, dataRoot]),
+  );
+  assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_USER_DATA_DIR: user })),
+    new Set([...GROK_BOT_DATA_ROOTS, join(user, "sand-data"), join(user, "agent-data")]),
+  );
+  assert.deepEqual(
+    new Set(candidateGrokBotDataRoots({ SAND_USER_DATA_DIR: `  ${user}  ` })),
+    new Set([...GROK_BOT_DATA_ROOTS, join(user, "sand-data"), join(user, "agent-data")]),
+  );
+  assert.deepEqual(
+    new Set(
+      candidateGrokBotDataRoots({
+        SAND_DATA_ROOT: dataRoot,
+        SAND_USER_DATA_DIR: user,
+      }),
+    ),
+    new Set([
+      ...GROK_BOT_DATA_ROOTS,
+      dataRoot,
+      join(user, "sand-data"),
+      join(user, "agent-data"),
+    ]),
+  );
+  assert.ok(GROK_BOT_DATA_ROOTS.includes(DEFAULT_GROK_BOT_DATA_ROOT));
+  assert.ok(GROK_BOT_DATA_ROOTS.includes(LEGACY_GROK_BOT_DATA_ROOT));
 });

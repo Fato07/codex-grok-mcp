@@ -17,7 +17,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { grokBotDataRoot } from "./grok-bot-client.js";
+import { grokBotDataRoot, sandUserDataDir } from "./grok-bot-client.js";
 import {
   defaultBridgeConfigPath,
   loadPairingConfigSnapshot,
@@ -171,6 +171,9 @@ export type BridgeLifecycleErrorReason =
   | "RELEASE_TREE_WORLD_WRITABLE"
   | "TEST_REAL_DATA_ROOT";
 
+const PAIRING_REQUIRED_MESSAGE =
+  "Pairing is required before install. Pair first (`codex-grok-bridge connect`), then retry install.";
+
 export class BridgeLifecycleError extends Error {
   readonly code:
     | "already_installed"
@@ -182,6 +185,7 @@ export class BridgeLifecycleError extends Error {
     | "lifecycle_root_conflict"
     | "lifecycle_state_invalid"
     | "not_installed"
+    | "PAIRING_REQUIRED"
     | "pairing_changed"
     | "restore_failed"
     | "uninstall_incomplete"
@@ -190,7 +194,7 @@ export class BridgeLifecycleError extends Error {
   readonly reason: BridgeLifecycleErrorReason | undefined;
 
   constructor(code: BridgeLifecycleError["code"], reason?: BridgeLifecycleErrorReason) {
-    super(code);
+    super(code === "PAIRING_REQUIRED" ? PAIRING_REQUIRED_MESSAGE : code);
     this.name = "BridgeLifecycleError";
     this.code = code;
     this.reason = reason;
@@ -1785,10 +1789,8 @@ export function managedChildEnvironment(extra: NodeJS.ProcessEnv): NodeJS.Proces
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }
-  const sandUserDataDirectory = process.env.SAND_USER_DATA_DIR;
-  if (sandUserDataDirectory !== undefined && sandUserDataDirectory.trim() !== "") {
-    environment.SAND_USER_DATA_DIR = resolve(sandUserDataDirectory);
-  }
+  const userRoot = sandUserDataDir(process.env);
+  if (userRoot !== undefined) environment.SAND_USER_DATA_DIR = userRoot;
   const hermeticFlag = process.env.CODEX_GROK_TEST_HERMETIC;
   if (hermeticFlag !== undefined) {
     environment.CODEX_GROK_TEST_HERMETIC = hermeticFlag;
@@ -2006,6 +2008,9 @@ export class BridgeLifecycle {
   }
 
   async run(command: LifecycleCommand): Promise<LifecycleResult> {
+    if (command === "install") {
+      await this.#requirePairing();
+    }
     if (command !== "status") {
       await assertRemovalPreserves(join(this.#root, "releases"), this.#baseProtectedPaths);
     }
@@ -2326,6 +2331,15 @@ export class BridgeLifecycle {
     return { binding: rootBinding, recovered };
   }
 
+  async #requirePairing(): Promise<void> {
+    try {
+      await this.#hooks.pairingIdentity();
+    } catch (caught) {
+      if (caught instanceof BridgeLifecycleError) throw caught;
+      fail("PAIRING_REQUIRED");
+    }
+  }
+
   async #validatedCandidate(release: LifecycleRelease): Promise<Buffer> {
     const before = await this.#hooks.pairingIdentity();
     await this.#hooks.preflight(release);
@@ -2514,6 +2528,7 @@ export class BridgeLifecycle {
     this.#deferredBinding = false;
     const pairing = await this.#validatedCandidate(candidate);
     const status = await this.#recoverStale(await this.#hooks.inspect(), state.active);
+    const wasRunning = status.state === "active";
     if (status.state === "active") {
       if (
         !status.managed ||
@@ -2531,10 +2546,12 @@ export class BridgeLifecycle {
       await this.#hooks.start(candidate);
     } catch (caught) {
       if (caught instanceof BridgeLifecycleError && caught.code === "cutover_unknown") throw caught;
-      try {
-        await this.#hooks.start(state.active);
-      } catch {
-        fail("restore_failed");
+      if (wasRunning) {
+        try {
+          await this.#hooks.start(state.active);
+        } catch {
+          fail("restore_failed");
+        }
       }
       fail("update_failed_restored");
     }

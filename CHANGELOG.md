@@ -2,6 +2,40 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.10] - 2026-10-04
+
+Prerelease. Stable `0.2.0` is not published; this beta carries every change since `0.2.0-beta.9`.
+
+### Added
+
+- Bounded inbound Bot attachments (#12): `grok_read_bot` can return metadata-only attachment rows, and `grok_fetch_bot_attachment` serves one transcript entry as an untrusted MCP resource or image after a fresh roster and path lookup.
+- Bounded outbound Bot attachments (#13): `grok_send_bot_attachment` validates one local file, binds a native confirmation to that exact Bot and file identity, then stages, commits, and sends it once.
+
+### Security
+
+- Inbound fetch takes the path only from a fresh transcript entry, opens once with `O_NOFOLLOW`, requires a regular file with `nlink === 1`, and pins the opened fd. Hardlinks, dangling symlinks, other Bots' directories, and missing `/proc/self/fd` fail closed.
+- Outbound send denies credential, pairing, CLI home, and Sand `gateway.json`/`config/` trees by resolved path, file identity, and ancestor identity. Every `$SAND_USER_DATA_DIR/{sand-data,agent-data}` root is denied whenever that variable is set, including when `SAND_DATA_ROOT` is also set.
+- Attachment capabilities are advertised only for a pinned host version. Host-committed files persist with the Bot; this connector cannot delete them. Live Bot attachment delivery is unverified.
+
+### Fixed
+
+- The installed-package candidate check no longer runs the build under npm 9/10, and npx's `npm_execpath` pointing at `npx-cli.js` is resolved to a sibling `npm-cli.js` when present.
+- A whitespace-padded `SAND_USER_DATA_DIR` is trimmed before it is resolved (`sandUserDataDir` in `src/grok-bot-client.ts`, used by `managedChildEnvironment`). Previously `'  /srv/u  '` was resolved relative to cwd.
+- A failed `update` or `rollback` target start restores the prior run state: the retained release is restarted only if the companion was running before the switch. A stopped companion stays stopped (`update_failed_restored`); `state.json` is unchanged and staging leftovers are removed.
+- `install` without a valid pairing now fails with `PAIRING_REQUIRED` before staging a release, writing bindings, or taking a lease, and leaves nothing on disk.
+- The companion detects a dead or half-open relay socket with a WebSocket ping (30 s) and pong/inbound-frame deadline (10 s), then follows the normal reconnect path. A send already in flight is not retried.
+- Reconnect backoff resets to the first delay only after the connection has proven healthy (first pong, first valid inbound frame, or 10 s stable uptime). A relay that accepts then immediately drops still backs off up to 15 s.
+- Aborting a companion while the relay handshake is still `CONNECTING` ignores only the ws 8.x `WebSocket was closed before the connection was established` error, so SIGTERM during handshake does not crash with an uncaught exception.
+- `GATEWAY_ENV_MISMATCH` is carried on the paired `CONFIG_INVALID` error. The Codex-visible message names `SAND_HOST_PORT` and `SAND_GATEWAY_BIND_HOST` so a bind-host mismatch is not reported as a port-only error.
+- Mixed-version beta.9 MCP: the new `reason` key on the error wire is rejected by beta.9's strict error schema, so a definitely-failed send is shown as `outcome_unknown` (the safe direction).
+
+### Verified boundaries
+
+- macOS is the supported host path. Automated coverage also runs on Ubuntu with Node.js 20.19.2, 22, and 24, but Linux live support remains unverified.
+- Gateway acceptance, transcript observation, Bot activity, and task completion remain separate proof levels.
+- Persistent Bot access relies on an unofficial Grok Bot gateway and remains explicitly experimental.
+- Live verification of outbound attachment acceptance, Bot-visible receipt, Temporal inbound shape, and HTTP error shapes has not been run.
+
 ## [0.2.0-beta.9] - 2026-10-04
 
 Prerelease. Stable `0.2.0` is not published; this beta carries every change since `0.2.0-beta.8`.
