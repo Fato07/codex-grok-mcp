@@ -41,7 +41,10 @@ const READ_COMPLETION_BOUNDARY = "activity_snapshot_not_task_completion" as cons
 
 // ponytail: two roster checks plus 50 sequential 15-second paired requests fit the 820-second plugin timeout; add chunked approvals if larger rosters appear.
 
+export type AttachmentApprovalAction = "decline" | "cancel";
+
 export type GrokBotGatewayErrorCode =
+  | "APPROVAL_UNAVAILABLE"
   | "ATTACHMENT_INTEGRITY"
   | "ATTACHMENT_REJECTED"
   | "ATTACHMENT_STALE"
@@ -65,6 +68,7 @@ export class GrokBotGatewayError extends Error {
   readonly deliveryMayHaveOccurred: boolean;
   readonly commitMayHaveOccurred: boolean;
   readonly failedStage: AttachmentFailedStage | undefined;
+  readonly approvalAction: AttachmentApprovalAction | undefined;
   readonly requestId: string | undefined;
 
   constructor(
@@ -74,6 +78,7 @@ export class GrokBotGatewayError extends Error {
       deliveryMayHaveOccurred?: boolean;
       commitMayHaveOccurred?: boolean;
       failedStage?: AttachmentFailedStage;
+      approvalAction?: AttachmentApprovalAction;
       requestId?: string;
     } = {},
   ) {
@@ -83,6 +88,7 @@ export class GrokBotGatewayError extends Error {
     this.deliveryMayHaveOccurred = options.deliveryMayHaveOccurred ?? false;
     this.commitMayHaveOccurred = options.commitMayHaveOccurred ?? false;
     this.failedStage = options.failedStage;
+    this.approvalAction = options.approvalAction;
     this.requestId = options.requestId;
   }
 }
@@ -461,6 +467,7 @@ function error(
     deliveryMayHaveOccurred?: boolean;
     commitMayHaveOccurred?: boolean;
     failedStage?: AttachmentFailedStage;
+    approvalAction?: AttachmentApprovalAction;
     requestId?: string;
   } = {},
 ): GrokBotGatewayError {
@@ -473,8 +480,10 @@ function compareBots(left: GrokBotSummary, right: GrokBotSummary): number {
   return 0;
 }
 
+// Stable identity only: is_running flips whenever any Bot starts or stops work, which broke
+// preview -> confirm on active rosters. Callers pass id-sorted Bots (listGrokBots).
 export function rosterFingerprint(bots: GrokBotSummary[]): string {
-  const canonical = bots.map(({ id, name, is_running }) => ({ id, name, is_running }));
+  const canonical = bots.map(({ id, name }) => ({ id, name }));
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
 }
 
@@ -597,6 +606,16 @@ async function sendKnownBotMessage(
 
 const ATTACHMENT_APPROVAL_KEY = "approve_attachment_send";
 const ATTACHMENT_CONFIRMATION = "SEND_ATTACHMENT";
+const ATTACHMENT_APPROVAL_UNAVAILABLE =
+  "Attachment send requires a client approval mode that prompts (Codex on-request, not never). No file was transferred.";
+
+function clientCanPromptAttachmentApproval(server: McpServer): boolean {
+  const elicitation = server.server.getClientCapabilities()?.elicitation;
+  if (elicitation === undefined) return false;
+  if (typeof elicitation !== "object" || elicitation === null) return false;
+  const modes = elicitation as { form?: unknown; url?: unknown };
+  return modes.form !== undefined || modes.url === undefined;
+}
 
 const attachmentApprovalSchema = z
   .object({
@@ -658,6 +677,7 @@ function annotateAttachmentFailure(
       deliveryMayHaveOccurred: caught.deliveryMayHaveOccurred,
       commitMayHaveOccurred: extra.commitMayHaveOccurred ?? caught.commitMayHaveOccurred,
       failedStage: caught.failedStage ?? failedStage,
+      ...(caught.approvalAction === undefined ? {} : { approvalAction: caught.approvalAction }),
       ...(caught.requestId === undefined ? {} : { requestId: caught.requestId }),
     });
   }
@@ -749,12 +769,14 @@ function toolError(caught: unknown): {
     : "No automatic retry was attempted.";
   const request = failure.requestId === undefined ? "" : ` Request ID: ${failure.requestId}.`;
   const stage = failure.failedStage === undefined ? "" : ` failed_stage=${failure.failedStage}.`;
+  const approval =
+    failure.approvalAction === undefined ? "" : ` approval_action=${failure.approvalAction}.`;
   const commit = failure.commitMayHaveOccurred ? " commit_may_have_occurred." : "";
   return {
     content: [
       {
         type: "text",
-        text: `[${failure.code}] ${failure.message}${request}${stage}${commit} ${outcome}`,
+        text: `[${failure.code}] ${failure.message}${request}${stage}${approval}${commit} ${outcome}`,
       },
     ],
     isError: true,
@@ -1358,6 +1380,11 @@ export function registerGrokBotTools(
           ATTACHMENT_APPROVAL_KEY,
         );
         if (approvalResponse.kind === "missing") {
+          if (!clientCanPromptAttachmentApproval(server)) {
+            throw error("APPROVAL_UNAVAILABLE", ATTACHMENT_APPROVAL_UNAVAILABLE, {
+              failedStage: "validated",
+            });
+          }
           return inputRequired({
             inputRequests: {
               [ATTACHMENT_APPROVAL_KEY]: inputRequired.elicit({
@@ -1366,6 +1393,15 @@ export function registerGrokBotTools(
                 requestedSchema: attachmentApprovalRequestedSchema,
               }),
             },
+          });
+        }
+        if (
+          approvalResponse.kind === "elicit" &&
+          (approvalResponse.action === "decline" || approvalResponse.action === "cancel")
+        ) {
+          throw error("CANCELLED", "Attachment send was not approved. No file was transferred.", {
+            failedStage: "validated",
+            approvalAction: approvalResponse.action,
           });
         }
         const approval = acceptedContent(

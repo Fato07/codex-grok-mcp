@@ -2,6 +2,17 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Roster fingerprints hash only stable Bot identity (`id` and `name`). `is_running` is omitted so an active Bot no longer invalidates attachment preview → confirm with `ROSTER_CHANGED`.
+- Attachment confirm no longer has a silent fallback when the client cannot prompt. Declined or cancelled elicitation is `CANCELLED` with `approval_action` (`decline` or `cancel`). Missing elicitation capability or an auto-decline policy such as Codex `approval_policy` `never` is `APPROVAL_UNAVAILABLE`. Nothing is transferred in either path.
+
+### Changed
+
+- Attachment sends need a client approval mode that prompts (Codex on-request, not never). Documented in the README, attachment contract, and SECURITY.md.
+
 ## [0.2.0-beta.10] - 2026-10-04
 
 Prerelease. Stable `0.2.0` is not published; this beta carries every change since `0.2.0-beta.9`.

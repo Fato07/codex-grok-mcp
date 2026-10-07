@@ -163,13 +163,18 @@ function unavailableOpenedFd() {
   throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
 }
 
-async function openAttachmentMcp(transport, { approve = false } = {}) {
+async function openAttachmentMcp(
+  transport,
+  { approve = false, elicitationAction, capabilities = { elicitation: {} } } = {},
+) {
   const mcpServer = new McpServer({ name: "attachment-tool-test", version: "1" });
   registerGrokBotTools(mcpServer, transport, { attachmentGuard: FIXTURE_GUARD });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const elicitationRequests = [];
   let nextId = 0;
   const pending = new Map();
+  const action =
+    elicitationAction ?? (approve ? "accept" : "decline");
   clientTransport.onmessage = async (message) => {
     if ("method" in message) {
       if (message.method === "elicitation/create" && "id" in message) {
@@ -177,9 +182,10 @@ async function openAttachmentMcp(transport, { approve = false } = {}) {
         await clientTransport.send({
           jsonrpc: "2.0",
           id: message.id,
-          result: approve
-            ? { action: "accept", content: { confirm: true } }
-            : { action: "decline" },
+          result:
+            action === "accept"
+              ? { action: "accept", content: { confirm: true } }
+              : { action },
         });
       }
       return;
@@ -201,7 +207,7 @@ async function openAttachmentMcp(transport, { approve = false } = {}) {
   await clientTransport.start();
   await request("initialize", {
     protocolVersion: LATEST_PROTOCOL_VERSION,
-    capabilities: { elicitation: {} },
+    capabilities,
     clientInfo: { name: "attachment-test", version: "1" },
   });
   await clientTransport.send({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -1354,8 +1360,116 @@ test("declined attachment elicitation is CANCELLED with no stage call", async (c
     });
     assert.equal(declined.isError, true);
     assert.match(declined.content[0].text, /CANCELLED/);
+    assert.match(declined.content[0].text, /approval_action=decline/);
     assert.equal(staged, 0);
     assert.equal(mcp.elicitationRequests.length, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("cancelled attachment elicitation is CANCELLED with approval_action=cancel", async (context) => {
+  const root = await fixtureDir(context, "att-tool-cancel");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  let staged = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async stageAttachment() {
+      staged += 1;
+    },
+    async commitAttachment() {
+      throw new Error("unused");
+    },
+  };
+  const previewServer = await openAttachmentMcp(transport);
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_send_bot_attachment",
+    arguments: { bot_id: BOT, path },
+  });
+  await previewServer.close();
+  const mcp = await openAttachmentMcp(transport, { elicitationAction: "cancel" });
+  try {
+    const cancelled = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: preview.structuredContent.preview_token,
+      },
+    });
+    assert.equal(cancelled.isError, true);
+    assert.match(cancelled.content[0].text, /CANCELLED/);
+    assert.match(cancelled.content[0].text, /approval_action=cancel/);
+    assert.doesNotMatch(cancelled.content[0].text, /approval_action=decline/);
+    assert.equal(staged, 0);
+    assert.equal(mcp.elicitationRequests.length, 1);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("attachment confirm without a prompting client is APPROVAL_UNAVAILABLE", async (context) => {
+  const root = await fixtureDir(context, "att-tool-no-elicit");
+  const path = await writeText(root, "note.txt", "hello attachment\n");
+  let staged = 0;
+  const transport = {
+    async listBots() {
+      return [{ id: BOT, name: "Ada", is_running: true }];
+    },
+    async readBot() {
+      throw new Error("unused");
+    },
+    async sendMessage() {
+      throw new Error("unused");
+    },
+    async stageAttachment() {
+      staged += 1;
+    },
+    async commitAttachment() {
+      throw new Error("unused");
+    },
+  };
+  const previewServer = await openAttachmentMcp(transport);
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_send_bot_attachment",
+    arguments: { bot_id: BOT, path },
+  });
+  await previewServer.close();
+  const mcp = await openAttachmentMcp(transport, {
+    approve: false,
+    capabilities: {},
+  });
+  try {
+    const unavailable = await mcp.request("tools/call", {
+      name: "grok_send_bot_attachment",
+      arguments: {
+        bot_id: BOT,
+        path,
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        confirmation: "SEND_ATTACHMENT",
+        path_identity: preview.structuredContent.path_identity,
+        sha256: preview.structuredContent.sha256,
+        preview_token: preview.structuredContent.preview_token,
+      },
+    });
+    assert.equal(unavailable.isError, true);
+    assert.match(unavailable.content[0].text, /APPROVAL_UNAVAILABLE/);
+    assert.match(unavailable.content[0].text, /on-request, not never/);
+    assert.doesNotMatch(unavailable.content[0].text, /CANCELLED/);
+    assert.equal(staged, 0);
+    assert.equal(mcp.elicitationRequests.length, 0);
   } finally {
     await mcp.close();
   }
