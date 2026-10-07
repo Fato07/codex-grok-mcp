@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://fato07.github.io/codex-grok-mcp/">Website</a> ·
   <a href="https://www.npmjs.com/package/codex-grok-mcp">npm</a> ·
-  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.10">v0.2.0-beta.10</a>
+  <a href="https://github.com/Fato07/codex-grok-mcp/releases/tag/v0.2.0-beta.11">v0.2.0-beta.11</a>
 </p>
 
 An unofficial, local-first bridge that lets Codex ask Grok once or collaborate with named Grok Bots already running inside the Grok Bot app.
@@ -25,7 +25,7 @@ An unofficial, local-first bridge that lets Codex ask Grok once or collaborate w
 | Linux isolated CLI path | Unverified |
 | Windows, WSL, and Codex cloud | Unsupported or unverified |
 
-The supported release is the exact npm package `codex-grok-mcp@0.2.0-beta.10` and its immutable GitHub prerelease. Stable `0.2.0` is not published yet; its gate is [RELEASING.md](RELEASING.md).
+The supported release is the exact npm package `codex-grok-mcp@0.2.0-beta.11` and its immutable GitHub prerelease. Stable `0.2.0` is not published yet; its gate is [RELEASING.md](RELEASING.md).
 
 ## Quick start
 
@@ -40,7 +40,7 @@ For one-off `grok_ask` calls, install and sign in to Grok CLI (`grok --version` 
 Install the immutable marketplace release and plugin:
 
 ```bash
-codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.10
+codex plugin marketplace add Fato07/codex-grok-mcp --ref v0.2.0-beta.11
 codex plugin add codex-grok-mcp@codex-grok
 ```
 
@@ -52,12 +52,12 @@ Ask Grok to challenge this architecture and return the three strongest objection
 
 That uses the one-off path. To work with Bots already running in Grok Bot, complete [the persistent Bot setup](#connect-codex-to-grok-bots).
 
-The plugin runs only `codex-grok-mcp@0.2.0-beta.10` through `npx`. It does not change Grok authentication.
+The plugin runs only `codex-grok-mcp@0.2.0-beta.11` through `npx`. It does not change Grok authentication.
 
 For direct MCP setup without the plugin wrapper:
 
 ```bash
-codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-mcp
+codex mcp add grok -- npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-mcp
 ```
 
 Start a new Codex task after adding the server.
@@ -65,7 +65,7 @@ Start a new Codex task after adding the server.
 ## Check setup
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-mcp --doctor
+npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-mcp --doctor
 ```
 
 Doctor checks the local executable, login, and selected model without sending a prompt. It must not print authentication material.
@@ -133,7 +133,7 @@ From the repository root on the Mac:
 
 ```bash
 CODEX_GROK_RELAY_TOKEN="$RELAY_TOKEN" \
-npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- \
+npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- \
 codex-grok-mcp pair --relay-url wss://YOUR-WORKER.workers.dev/v1/connect
 unset RELAY_TOKEN
 ```
@@ -145,8 +145,8 @@ The command prints a private pairing code only in the interactive terminal.
 In **Grok Bot's Computer** terminal, not in a Bot chat, run:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-bridge connect
+npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-bridge connect
 ```
 
 Paste the pairing code into the no-echo prompt. Keep the terminal running while using Bot tools.
@@ -156,8 +156,8 @@ Paste the pairing code into the no-echo prompt. Keep the terminal running while 
 Stop the foreground companion with `Ctrl-C`, then run the chosen exact version:
 
 ```bash
-npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-bridge probe
-npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-bridge run
+npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-bridge probe
+npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-bridge run
 ```
 
 For automatic beta updates on each restart, with the reproducibility tradeoff made explicit:
@@ -234,7 +234,7 @@ The resolved release is stored as an exact version. Later `start`, `restart`, `e
 3. Use `grok_send_bot_message` once for one exact target.
 4. For all-Bot `PING`, preview the roster and review the native confirmation before accepting it.
 
-Reads return sanitized text plus metadata-only attachment rows when the companion and host support v1 attachments. https URLs are reported as not fetchable. Fetch results are untrusted MCP resources or images: never execute, extract, or auto-open them. Outbound attachment sends need a client approval mode that prompts (Codex `on-request`, not `never`). A declined or cancelled prompt is `CANCELLED`; a client that cannot prompt is `APPROVAL_UNAVAILABLE`. Nothing is transferred in either case. Host-committed attachments persist with the Bot; this connector cannot delete them. Live verification of server acceptance, Bot-visible receipt, Temporal inbound shape, and HTTP error shapes is still pending. Reads do not prove that a message answered a particular send or that a task finished. A successful send receipt means only that the gateway accepted the request. Timeouts and interrupted sends remain `outcome_unknown`; do not retry them automatically.
+Reads return sanitized text plus metadata-only attachment rows when the companion and host support v1 attachments. https URLs are reported as not fetchable. Fetch results are untrusted MCP resources or images: never execute, extract, or auto-open them. Outbound attachment sends and all-Bot PING confirms need a client approval mode that prompts (Codex `on-request`, not `never`). A declined or cancelled prompt after a human-scale wait is `CANCELLED` with `approval_action`. A client that cannot prompt, or that auto-declines faster than a human could respond (real Codex `never` has advertised elicitation then declined in ~1.7s), is `APPROVAL_UNAVAILABLE`. A slower `CANCELLED` with `approval_action=decline` may still be an auto-decline; switch to on-request if that happens. Nothing is transferred in either case. Host-committed attachments persist with the Bot; this connector cannot delete them. Live verification of server acceptance, Bot-visible receipt, Temporal inbound shape, and HTTP error shapes is still pending. Reads do not prove that a message answered a particular send or that a task finished. A successful send receipt means only that the gateway accepted the request. Timeouts and interrupted sends remain `outcome_unknown`; do not retry them automatically.
 
 ## Configuration
 
@@ -254,7 +254,8 @@ The plugin passes only these connector options. Pairing is stored in a private m
 - **Tool missing:** confirm the `codex-grok` marketplace and plugin are installed, then start a new Codex task. For direct setup, inspect `codex mcp list`.
 - **CLI missing or signed out:** run `grok --version`, `grok models`, and the pinned doctor command. Complete normal Grok login outside Codex.
 - **`UPGRADE_REQUIRED`:** stop and restart the VM companion with the same package version as the connector. Attachment tools also require a pinned host version (`f5c783a` today); text tools stay available when host attachment support is missing.
-- **`APPROVAL_UNAVAILABLE`:** `grok_send_bot_attachment` needs a client that can show the native confirmation. Use Codex `on-request` (not `never` or another auto-decline policy). Nothing is transferred.
+- **`APPROVAL_UNAVAILABLE`:** `grok_send_bot_attachment` and `grok_ping_all_bots` need a client that can show the native confirmation. Use Codex `on-request` (not `never`). Real Codex `never` may still advertise elicitation and auto-decline in under two seconds; that path is also `APPROVAL_UNAVAILABLE`. Nothing is transferred.
+- **`CANCELLED`:** the confirmation was declined or cancelled after a prompt (`approval_action` is `decline` or `cancel`). A slower auto-decline that cannot be distinguished from a human decline may still surface as `CANCELLED` with `approval_action=decline`; switch to on-request if that happens. Nothing is transferred.
 - **`DATA_ROOT_SYMLINK`:** set `SAND_DATA_ROOT` to the real Grok Bot data directory, not a symlink. The companion rejects symlinked descriptor parents.
 - **`companion_lease_stale`:** run the exact pinned `install` command when no managed version is installed. It can reclaim only a strictly revalidated dead foreground lease. Use `ensure` only after managed installation. Do not delete the lease manually.
 - **`companion_lease_recovery_required`:** an interrupted lease mutation left a private hard-link claim. Stop every old and new companion or lifecycle command. Do not start another companion, delete pairing, or remove the canonical `.lock`. An operator may remove only the matching `.claim` after independently proving that no lifecycle or companion process is running; otherwise fail closed and report the incident.
@@ -271,19 +272,19 @@ When reporting a bug, include redacted OS, architecture, Node, Codex, Grok CLI, 
 1. Press `Ctrl-C` for a foreground VM companion. For a managed lifecycle install, run `uninstall`; it stops the exact managed process and removes only the private managed release store, lifecycle state, and paired ownership bindings. It preserves pairing, Grok data, and replay protection for the explicit steps that follow.
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-bridge uninstall
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-bridge uninstall
    ```
 
 2. In the VM terminal, remove its pairing:
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-bridge unpair
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-bridge unpair
    ```
 
 3. On the Mac, remove the local pairing:
 
    ```bash
-   npx --yes --package=codex-grok-mcp@0.2.0-beta.10 -- codex-grok-mcp unpair
+   npx --yes --package=codex-grok-mcp@0.2.0-beta.11 -- codex-grok-mcp unpair
    ```
 
 4. Uninstall **Codex Grok MCP** in Codex. If configured directly, run `codex mcp remove grok`. Then remove the marketplace with `codex plugin marketplace remove codex-grok`.

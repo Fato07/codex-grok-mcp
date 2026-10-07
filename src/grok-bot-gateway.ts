@@ -606,15 +606,57 @@ async function sendKnownBotMessage(
 
 const ATTACHMENT_APPROVAL_KEY = "approve_attachment_send";
 const ATTACHMENT_CONFIRMATION = "SEND_ATTACHMENT";
-const ATTACHMENT_APPROVAL_UNAVAILABLE =
-  "Attachment send requires a client approval mode that prompts (Codex on-request, not never). No file was transferred.";
+export const HUMAN_APPROVAL_MIN_MS = 2_500;
+const APPROVAL_UNAVAILABLE_MESSAGE =
+  "This action requires a client approval mode that prompts (Codex on-request, not never). Nothing was sent.";
+const CANCELLED_MAY_BE_AUTO =
+  "If this decline was automatic (for example Codex approval_policy never), switch to on-request and confirm again.";
 
-function clientCanPromptAttachmentApproval(server: McpServer): boolean {
+let approvalNowMs = (): number => Date.now();
+const approvalPromptedAtMs = new Map<string, number>();
+
+export function setApprovalNowMsForTest(now?: () => number): void {
+  approvalNowMs = now ?? (() => Date.now());
+}
+
+function clientCanPromptApproval(server: McpServer): boolean {
   const elicitation = server.server.getClientCapabilities()?.elicitation;
   if (elicitation === undefined) return false;
   if (typeof elicitation !== "object" || elicitation === null) return false;
   const modes = elicitation as { form?: unknown; url?: unknown };
   return modes.form !== undefined || modes.url === undefined;
+}
+
+function rememberApprovalPrompt(promptId: string): void {
+  approvalPromptedAtMs.set(promptId, approvalNowMs());
+}
+
+function elicitationSignalsAutoDecline(
+  responses: Record<string, unknown> | undefined,
+  key: string,
+): boolean {
+  const entry = responses?.[key];
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const record = entry as { _meta?: Record<string, unknown>; content?: Record<string, unknown> };
+  for (const bag of [record._meta, record.content]) {
+    if (bag === undefined || bag === null || typeof bag !== "object") continue;
+    const policy = bag.approval_policy ?? bag.approvalPolicy;
+    if (policy === "never" || policy === "auto-decline") return true;
+    if (bag.auto_decline === true || bag.autoDecline === true) return true;
+  }
+  return false;
+}
+
+function approvalLooksUnprompted(
+  responses: Record<string, unknown> | undefined,
+  key: string,
+  promptId: string,
+): boolean {
+  if (elicitationSignalsAutoDecline(responses, key)) return true;
+  const started = approvalPromptedAtMs.get(promptId);
+  approvalPromptedAtMs.delete(promptId);
+  if (started === undefined) return true;
+  return approvalNowMs() - started < HUMAN_APPROVAL_MIN_MS;
 }
 
 const attachmentApprovalSchema = z
@@ -1218,6 +1260,10 @@ export function registerGrokBotTools(
           PING_APPROVAL_KEY,
         );
         if (approvalResponse.kind === "missing") {
+          if (!clientCanPromptApproval(server)) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE);
+          }
+          rememberApprovalPrompt(`${PING_APPROVAL_KEY}:${roster.roster_fingerprint}`);
           return inputRequired({
             inputRequests: {
               [PING_APPROVAL_KEY]: inputRequired.elicit({
@@ -1228,6 +1274,26 @@ export function registerGrokBotTools(
             },
           });
         }
+        if (
+          approvalResponse.kind === "elicit" &&
+          (approvalResponse.action === "decline" || approvalResponse.action === "cancel")
+        ) {
+          if (
+            approvalLooksUnprompted(
+              context.mcpReq.inputResponses,
+              PING_APPROVAL_KEY,
+              `${PING_APPROVAL_KEY}:${roster.roster_fingerprint}`,
+            )
+          ) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE);
+          }
+          throw error(
+            "CANCELLED",
+            `PING-to-all was not approved. No messages were sent. ${CANCELLED_MAY_BE_AUTO}`,
+            { approvalAction: approvalResponse.action },
+          );
+        }
+        approvalPromptedAtMs.delete(`${PING_APPROVAL_KEY}:${roster.roster_fingerprint}`);
         const approval = acceptedContent(
           context.mcpReq.inputResponses,
           PING_APPROVAL_KEY,
@@ -1380,11 +1446,12 @@ export function registerGrokBotTools(
           ATTACHMENT_APPROVAL_KEY,
         );
         if (approvalResponse.kind === "missing") {
-          if (!clientCanPromptAttachmentApproval(server)) {
-            throw error("APPROVAL_UNAVAILABLE", ATTACHMENT_APPROVAL_UNAVAILABLE, {
+          if (!clientCanPromptApproval(server)) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE, {
               failedStage: "validated",
             });
           }
+          rememberApprovalPrompt(`${ATTACHMENT_APPROVAL_KEY}:${previewToken}`);
           return inputRequired({
             inputRequests: {
               [ATTACHMENT_APPROVAL_KEY]: inputRequired.elicit({
@@ -1399,11 +1466,27 @@ export function registerGrokBotTools(
           approvalResponse.kind === "elicit" &&
           (approvalResponse.action === "decline" || approvalResponse.action === "cancel")
         ) {
-          throw error("CANCELLED", "Attachment send was not approved. No file was transferred.", {
-            failedStage: "validated",
-            approvalAction: approvalResponse.action,
-          });
+          if (
+            approvalLooksUnprompted(
+              context.mcpReq.inputResponses,
+              ATTACHMENT_APPROVAL_KEY,
+              `${ATTACHMENT_APPROVAL_KEY}:${previewToken}`,
+            )
+          ) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE, {
+              failedStage: "validated",
+            });
+          }
+          throw error(
+            "CANCELLED",
+            `Attachment send was not approved. No file was transferred. ${CANCELLED_MAY_BE_AUTO}`,
+            {
+              failedStage: "validated",
+              approvalAction: approvalResponse.action,
+            },
+          );
         }
+        approvalPromptedAtMs.delete(`${ATTACHMENT_APPROVAL_KEY}:${previewToken}`);
         const approval = acceptedContent(
           context.mcpReq.inputResponses,
           ATTACHMENT_APPROVAL_KEY,

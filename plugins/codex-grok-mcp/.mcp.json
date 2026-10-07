@@ -5,7 +5,7 @@
       "cwd": ".",
       "args": [
         "--yes",
-        "--package=codex-grok-mcp@0.2.0-beta.10",
+        "--package=codex-grok-mcp@0.2.0-beta.11",
         "--",
         "codex-grok-mcp"
       ],

@@ -1640,6 +1640,48 @@ test("install before pairing fails with PAIRING_REQUIRED and writes nothing", as
   await assertNoStagingLeftovers(root);
 });
 
+test("status reports unmanaged for a non-managed run lease and keeps state.json previous", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-grok-unmanaged-status-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { lifecycle, controls } = harness(root);
+  const v1 = release("0.2.0-beta.5", 1);
+  const v2 = release("0.2.0-beta.6", 2);
+
+  await lifecycle.run("install");
+  controls.setStatus({
+    state: "active",
+    managed: false,
+    companionVersion: v1.version,
+    protocolVersions: [...v1.protocol_versions],
+    releaseIntegrity: v1.integrity,
+  });
+  let status = await lifecycle.run("status");
+  assert.equal(status.state, "unmanaged");
+  assert.equal(status.active_version, v1.version);
+  assert.equal(status.previous_version, null);
+
+  controls.setStatus({
+    state: "active",
+    managed: true,
+    companionVersion: v1.version,
+    protocolVersions: [...v1.protocol_versions],
+    releaseIntegrity: v1.integrity,
+  });
+  controls.setCurrent(v2);
+  await lifecycle.run("update");
+  controls.setStatus({
+    state: "active",
+    managed: false,
+    companionVersion: v2.version,
+    protocolVersions: [...v2.protocol_versions],
+    releaseIntegrity: v2.integrity,
+  });
+  status = await lifecycle.run("status");
+  assert.equal(status.state, "unmanaged");
+  assert.equal(status.active_version, v2.version);
+  assert.equal(status.previous_version, v1.version);
+});
+
 test("an ambiguous activation never triggers an automatic second cutover", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-grok-lifecycle-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -1658,7 +1700,7 @@ test("an ambiguous activation never triggers an automatic second cutover", async
   const status = await lifecycle.run("status");
   assert.equal(status.state, "cutover_unknown");
   assert.equal(status.active_version, "0.2.0-beta.6");
-  assert.equal(status.previous_version, "0.2.0-beta.5");
+  assert.equal(status.previous_version, null);
 
   const recovered = await lifecycle.run("update");
   assert.equal(recovered.state, "running");

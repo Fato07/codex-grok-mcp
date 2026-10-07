@@ -9,9 +9,11 @@ import {
 } from "@modelcontextprotocol/server";
 import { createDirectGatewayTransport } from "../dist/direct-gateway-transport.js";
 import {
+  HUMAN_APPROVAL_MIN_MS,
   listGrokBots,
   MAX_PING_BOTS,
   registerGrokBotTools,
+  setApprovalNowMsForTest,
 } from "../dist/grok-bot-gateway.js";
 import { createServer } from "../dist/index.js";
 import { RELAY_TIMEOUT_MS } from "../dist/relay-transport.js";
@@ -59,16 +61,23 @@ test("plugin timeout covers worst-case sequential paired ping-all", () => {
   assert(wholeCallBudgetMs >= internalBudgetMs + 30_000);
 });
 
-async function openMcp(env, { approvePingAll = false, server } = {}) {
+async function openMcp(
+  env,
+  { approvePingAll = false, server, capabilities = { elicitation: {} }, approvalElapsedMs } = {},
+) {
   const mcpServer = server ?? createServer(env);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const elicitationRequests = [];
   let nextId = 0;
   const pending = new Map();
+  let nowMs = 1_000_000;
+  setApprovalNowMsForTest(() => nowMs);
+  const elapsed = approvalElapsedMs ?? (approvePingAll ? 0 : HUMAN_APPROVAL_MIN_MS);
   clientTransport.onmessage = async (message) => {
     if ("method" in message) {
       if (message.method === "elicitation/create" && "id" in message) {
         elicitationRequests.push(message.params);
+        nowMs += elapsed;
         await clientTransport.send({
           jsonrpc: "2.0",
           id: message.id,
@@ -101,7 +110,7 @@ async function openMcp(env, { approvePingAll = false, server } = {}) {
   await clientTransport.start();
   await request("initialize", {
     protocolVersion: LATEST_PROTOCOL_VERSION,
-    capabilities: { elicitation: {} },
+    capabilities,
     clientInfo: { name: "gateway-test", version: "1" },
   });
   await clientTransport.send({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -117,6 +126,7 @@ async function openMcp(env, { approvePingAll = false, server } = {}) {
         params: { requestId },
       }),
     async close() {
+      setApprovalNowMsForTest();
       await clientTransport.close();
       await mcpServer.close();
     },
@@ -1133,3 +1143,106 @@ test("confirmed ping-all sends sequentially once per Bot and returns per-Bot rec
     await gateway.close();
   }
 });
+
+test("ping-all confirm without a prompting client is APPROVAL_UNAVAILABLE", async (context) => {
+  const gateway = await startGateway(context, ({ path }) => {
+    if (path === "/api/listAgents") return { body: BOTS.slice(0, 1) };
+    if (path === "/api/sendPrompt") return { body: { accepted: true } };
+    return { status: 404, body: { error: "not found" } };
+  });
+  const previewServer = await openMcp(gatewayEnv(gateway));
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_ping_all_bots",
+    arguments: {},
+  });
+  await previewServer.close();
+  const mcp = await openMcp(gatewayEnv(gateway), { capabilities: {} });
+  try {
+    const unavailable = await mcp.request("tools/call", {
+      name: "grok_ping_all_bots",
+      arguments: {
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        bot_ids: [BOTS[0].id],
+        confirmation: "PING_ALL",
+      },
+    });
+    assert.equal(unavailable.isError, true);
+    assert.match(unavailable.content[0].text, /APPROVAL_UNAVAILABLE/);
+    assert.equal(mcp.elicitationRequests.length, 0);
+    assert.equal(gateway.requests.filter(({ path }) => path === "/api/sendPrompt").length, 0);
+  } finally {
+    await mcp.close();
+    await gateway.close();
+  }
+});
+
+test("fast auto-decline of ping-all elicitation is APPROVAL_UNAVAILABLE", async (context) => {
+  const gateway = await startGateway(context, ({ path }) => {
+    if (path === "/api/listAgents") return { body: BOTS.slice(0, 1) };
+    if (path === "/api/sendPrompt") return { body: { accepted: true } };
+    return { status: 404, body: { error: "not found" } };
+  });
+  const previewServer = await openMcp(gatewayEnv(gateway));
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_ping_all_bots",
+    arguments: {},
+  });
+  await previewServer.close();
+  const mcp = await openMcp(gatewayEnv(gateway), { approvalElapsedMs: 1_700 });
+  try {
+    const unavailable = await mcp.request("tools/call", {
+      name: "grok_ping_all_bots",
+      arguments: {
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        bot_ids: [BOTS[0].id],
+        confirmation: "PING_ALL",
+      },
+    });
+    assert.equal(unavailable.isError, true);
+    assert.match(unavailable.content[0].text, /APPROVAL_UNAVAILABLE/);
+    assert.doesNotMatch(unavailable.content[0].text, /CANCELLED/);
+    assert.equal(mcp.elicitationRequests.length, 1);
+    assert.equal(gateway.requests.filter(({ path }) => path === "/api/sendPrompt").length, 0);
+  } finally {
+    await mcp.close();
+    await gateway.close();
+  }
+});
+
+test("ping-all preview with is_running false then confirm with true succeeds", async (context) => {
+  let running = false;
+  const gateway = await startGateway(context, ({ path }) => {
+    if (path === "/api/listAgents") {
+      return {
+        body: [{ id: BOTS[0].id, name: BOTS[0].name, isGroup: false, isRunning: running }],
+      };
+    }
+    if (path === "/api/sendPrompt") return { body: { accepted: true } };
+    return { status: 404, body: { error: "not found" } };
+  });
+  const previewServer = await openMcp(gatewayEnv(gateway));
+  const preview = await previewServer.request("tools/call", {
+    name: "grok_ping_all_bots",
+    arguments: {},
+  });
+  await previewServer.close();
+  running = true;
+  const mcp = await openMcp(gatewayEnv(gateway), { approvePingAll: true });
+  try {
+    const confirmed = await mcp.request("tools/call", {
+      name: "grok_ping_all_bots",
+      arguments: {
+        roster_fingerprint: preview.structuredContent.roster_fingerprint,
+        bot_ids: [BOTS[0].id],
+        confirmation: "PING_ALL",
+      },
+    });
+    assert.equal(confirmed.isError, undefined);
+    assert.equal(confirmed.structuredContent.accepted_count, 1);
+    assert.equal(gateway.requests.filter(({ path }) => path === "/api/sendPrompt").length, 1);
+  } finally {
+    await mcp.close();
+    await gateway.close();
+  }
+});
+

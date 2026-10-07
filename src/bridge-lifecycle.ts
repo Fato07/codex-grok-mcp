@@ -2733,13 +2733,16 @@ export class BridgeLifecycle {
               : "unmanaged"
             : processStatus.state;
     } else if (processStatus.state === "active") {
-      lifecycleState =
-        processStatus.managed &&
-        processStatus.companionVersion === state.active.version &&
-        processStatus.releaseIntegrity === state.active.integrity &&
-        (await this.#hooks.owns(state.active))
-          ? "running"
-          : "cutover_unknown";
+      if (!processStatus.managed) {
+        lifecycleState = "unmanaged";
+      } else {
+        lifecycleState =
+          processStatus.companionVersion === state.active.version &&
+          processStatus.releaseIntegrity === state.active.integrity &&
+          (await this.#hooks.owns(state.active))
+            ? "running"
+            : "cutover_unknown";
+      }
     } else {
       lifecycleState = processStatus.state;
     }
@@ -2757,10 +2760,7 @@ export class BridgeLifecycle {
       state: lifecycleState,
       changed,
       active_version: activeProcess?.companionVersion ?? state?.active.version ?? null,
-      previous_version:
-        lifecycleState === "cutover_unknown" && state !== undefined
-          ? state.active.version
-          : state?.previous?.version ?? null,
+      previous_version: state?.previous?.version ?? null,
       protocol_versions:
         activeProcess?.protocolVersions ?? state?.active.protocol_versions ?? [],
       pairing_valid: pairingValid,
