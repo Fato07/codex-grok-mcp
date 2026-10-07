@@ -141,10 +141,11 @@ test("release version copies match package.json", async () => {
     /^`([^`]+)` is the supported release\./gm,
     version,
   );
+  const changelogHeadings = [...changelog.matchAll(/^## \[([^\]]+)\]/gm)].map((match) => match[1]);
   check(
     "CHANGELOG.md",
     "latest release heading",
-    changelog.match(/^## \[([^\]]+)\]/m)?.[1],
+    changelogHeadings.find((heading) => heading !== "Unreleased"),
     version,
   );
   checkCopies(

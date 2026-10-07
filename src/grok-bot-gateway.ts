@@ -41,7 +41,10 @@ const READ_COMPLETION_BOUNDARY = "activity_snapshot_not_task_completion" as cons
 
 // ponytail: two roster checks plus 50 sequential 15-second paired requests fit the 820-second plugin timeout; add chunked approvals if larger rosters appear.
 
+export type AttachmentApprovalAction = "decline" | "cancel";
+
 export type GrokBotGatewayErrorCode =
+  | "APPROVAL_UNAVAILABLE"
   | "ATTACHMENT_INTEGRITY"
   | "ATTACHMENT_REJECTED"
   | "ATTACHMENT_STALE"
@@ -65,6 +68,7 @@ export class GrokBotGatewayError extends Error {
   readonly deliveryMayHaveOccurred: boolean;
   readonly commitMayHaveOccurred: boolean;
   readonly failedStage: AttachmentFailedStage | undefined;
+  readonly approvalAction: AttachmentApprovalAction | undefined;
   readonly requestId: string | undefined;
 
   constructor(
@@ -74,6 +78,7 @@ export class GrokBotGatewayError extends Error {
       deliveryMayHaveOccurred?: boolean;
       commitMayHaveOccurred?: boolean;
       failedStage?: AttachmentFailedStage;
+      approvalAction?: AttachmentApprovalAction;
       requestId?: string;
     } = {},
   ) {
@@ -83,6 +88,7 @@ export class GrokBotGatewayError extends Error {
     this.deliveryMayHaveOccurred = options.deliveryMayHaveOccurred ?? false;
     this.commitMayHaveOccurred = options.commitMayHaveOccurred ?? false;
     this.failedStage = options.failedStage;
+    this.approvalAction = options.approvalAction;
     this.requestId = options.requestId;
   }
 }
@@ -461,6 +467,7 @@ function error(
     deliveryMayHaveOccurred?: boolean;
     commitMayHaveOccurred?: boolean;
     failedStage?: AttachmentFailedStage;
+    approvalAction?: AttachmentApprovalAction;
     requestId?: string;
   } = {},
 ): GrokBotGatewayError {
@@ -473,8 +480,10 @@ function compareBots(left: GrokBotSummary, right: GrokBotSummary): number {
   return 0;
 }
 
+// Stable identity only: is_running flips whenever any Bot starts or stops work, which broke
+// preview -> confirm on active rosters. Callers pass id-sorted Bots (listGrokBots).
 export function rosterFingerprint(bots: GrokBotSummary[]): string {
-  const canonical = bots.map(({ id, name, is_running }) => ({ id, name, is_running }));
+  const canonical = bots.map(({ id, name }) => ({ id, name }));
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
 }
 
@@ -597,6 +606,58 @@ async function sendKnownBotMessage(
 
 const ATTACHMENT_APPROVAL_KEY = "approve_attachment_send";
 const ATTACHMENT_CONFIRMATION = "SEND_ATTACHMENT";
+export const HUMAN_APPROVAL_MIN_MS = 2_500;
+const APPROVAL_UNAVAILABLE_MESSAGE =
+  "This action requires a client approval mode that prompts (Codex on-request, not never). Nothing was sent.";
+const CANCELLED_MAY_BE_AUTO =
+  "If this decline was automatic (for example Codex approval_policy never), switch to on-request and confirm again.";
+
+let approvalNowMs = (): number => Date.now();
+const approvalPromptedAtMs = new Map<string, number>();
+
+export function setApprovalNowMsForTest(now?: () => number): void {
+  approvalNowMs = now ?? (() => Date.now());
+}
+
+function clientCanPromptApproval(server: McpServer): boolean {
+  const elicitation = server.server.getClientCapabilities()?.elicitation;
+  if (elicitation === undefined) return false;
+  if (typeof elicitation !== "object" || elicitation === null) return false;
+  const modes = elicitation as { form?: unknown; url?: unknown };
+  return modes.form !== undefined || modes.url === undefined;
+}
+
+function rememberApprovalPrompt(promptId: string): void {
+  approvalPromptedAtMs.set(promptId, approvalNowMs());
+}
+
+function elicitationSignalsAutoDecline(
+  responses: Record<string, unknown> | undefined,
+  key: string,
+): boolean {
+  const entry = responses?.[key];
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const record = entry as { _meta?: Record<string, unknown>; content?: Record<string, unknown> };
+  for (const bag of [record._meta, record.content]) {
+    if (bag === undefined || bag === null || typeof bag !== "object") continue;
+    const policy = bag.approval_policy ?? bag.approvalPolicy;
+    if (policy === "never" || policy === "auto-decline") return true;
+    if (bag.auto_decline === true || bag.autoDecline === true) return true;
+  }
+  return false;
+}
+
+function approvalLooksUnprompted(
+  responses: Record<string, unknown> | undefined,
+  key: string,
+  promptId: string,
+): boolean {
+  if (elicitationSignalsAutoDecline(responses, key)) return true;
+  const started = approvalPromptedAtMs.get(promptId);
+  approvalPromptedAtMs.delete(promptId);
+  if (started === undefined) return true;
+  return approvalNowMs() - started < HUMAN_APPROVAL_MIN_MS;
+}
 
 const attachmentApprovalSchema = z
   .object({
@@ -658,6 +719,7 @@ function annotateAttachmentFailure(
       deliveryMayHaveOccurred: caught.deliveryMayHaveOccurred,
       commitMayHaveOccurred: extra.commitMayHaveOccurred ?? caught.commitMayHaveOccurred,
       failedStage: caught.failedStage ?? failedStage,
+      ...(caught.approvalAction === undefined ? {} : { approvalAction: caught.approvalAction }),
       ...(caught.requestId === undefined ? {} : { requestId: caught.requestId }),
     });
   }
@@ -749,12 +811,14 @@ function toolError(caught: unknown): {
     : "No automatic retry was attempted.";
   const request = failure.requestId === undefined ? "" : ` Request ID: ${failure.requestId}.`;
   const stage = failure.failedStage === undefined ? "" : ` failed_stage=${failure.failedStage}.`;
+  const approval =
+    failure.approvalAction === undefined ? "" : ` approval_action=${failure.approvalAction}.`;
   const commit = failure.commitMayHaveOccurred ? " commit_may_have_occurred." : "";
   return {
     content: [
       {
         type: "text",
-        text: `[${failure.code}] ${failure.message}${request}${stage}${commit} ${outcome}`,
+        text: `[${failure.code}] ${failure.message}${request}${stage}${approval}${commit} ${outcome}`,
       },
     ],
     isError: true,
@@ -1196,6 +1260,10 @@ export function registerGrokBotTools(
           PING_APPROVAL_KEY,
         );
         if (approvalResponse.kind === "missing") {
+          if (!clientCanPromptApproval(server)) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE);
+          }
+          rememberApprovalPrompt(`${PING_APPROVAL_KEY}:${roster.roster_fingerprint}`);
           return inputRequired({
             inputRequests: {
               [PING_APPROVAL_KEY]: inputRequired.elicit({
@@ -1206,6 +1274,26 @@ export function registerGrokBotTools(
             },
           });
         }
+        if (
+          approvalResponse.kind === "elicit" &&
+          (approvalResponse.action === "decline" || approvalResponse.action === "cancel")
+        ) {
+          if (
+            approvalLooksUnprompted(
+              context.mcpReq.inputResponses,
+              PING_APPROVAL_KEY,
+              `${PING_APPROVAL_KEY}:${roster.roster_fingerprint}`,
+            )
+          ) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE);
+          }
+          throw error(
+            "CANCELLED",
+            `PING-to-all was not approved. No messages were sent. ${CANCELLED_MAY_BE_AUTO}`,
+            { approvalAction: approvalResponse.action },
+          );
+        }
+        approvalPromptedAtMs.delete(`${PING_APPROVAL_KEY}:${roster.roster_fingerprint}`);
         const approval = acceptedContent(
           context.mcpReq.inputResponses,
           PING_APPROVAL_KEY,
@@ -1358,6 +1446,12 @@ export function registerGrokBotTools(
           ATTACHMENT_APPROVAL_KEY,
         );
         if (approvalResponse.kind === "missing") {
+          if (!clientCanPromptApproval(server)) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE, {
+              failedStage: "validated",
+            });
+          }
+          rememberApprovalPrompt(`${ATTACHMENT_APPROVAL_KEY}:${previewToken}`);
           return inputRequired({
             inputRequests: {
               [ATTACHMENT_APPROVAL_KEY]: inputRequired.elicit({
@@ -1368,6 +1462,31 @@ export function registerGrokBotTools(
             },
           });
         }
+        if (
+          approvalResponse.kind === "elicit" &&
+          (approvalResponse.action === "decline" || approvalResponse.action === "cancel")
+        ) {
+          if (
+            approvalLooksUnprompted(
+              context.mcpReq.inputResponses,
+              ATTACHMENT_APPROVAL_KEY,
+              `${ATTACHMENT_APPROVAL_KEY}:${previewToken}`,
+            )
+          ) {
+            throw error("APPROVAL_UNAVAILABLE", APPROVAL_UNAVAILABLE_MESSAGE, {
+              failedStage: "validated",
+            });
+          }
+          throw error(
+            "CANCELLED",
+            `Attachment send was not approved. No file was transferred. ${CANCELLED_MAY_BE_AUTO}`,
+            {
+              failedStage: "validated",
+              approvalAction: approvalResponse.action,
+            },
+          );
+        }
+        approvalPromptedAtMs.delete(`${ATTACHMENT_APPROVAL_KEY}:${previewToken}`);
         const approval = acceptedContent(
           context.mcpReq.inputResponses,
           ATTACHMENT_APPROVAL_KEY,

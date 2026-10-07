@@ -1,4 +1,4 @@
-export const CODEX_GROK_VERSION = "0.2.0-beta.10";
+export const CODEX_GROK_VERSION = "0.2.0-beta.11";
 
 export const BRIDGE_STATUS_PROTOCOL_VERSION = 3 as const;
 export const BRIDGE_ATTACHMENT_PROTOCOL_VERSION = 4 as const;

@@ -81,7 +81,8 @@ test("local gateway client discovers loopback and exposes only bounded calls", a
       if (mode === "slow") {
         response.writeHead(200, { "content-type": "application/json" });
         response.flushHeaders();
-        setTimeout(() => response.end(JSON.stringify({ ok: true, isBusy: false })), 100);
+        // Never complete the body. A timed 100 ms reply raced the 20 ms timeout
+        // on slow macOS runners; ending on abort can look like INVALID_RESPONSE.
         return;
       }
       response.setHeader("content-type", "application/json");

@@ -2,6 +2,21 @@
 
 All notable changes will be documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0-beta.11] - 2026-10-07
+
+Prerelease. Stable `0.2.0` is not published; this beta carries every change since `0.2.0-beta.10`.
+
+### Fixed
+
+- Roster fingerprints hash only stable Bot identity (`id` and `name`). `is_running` is omitted so an active Bot no longer invalidates attachment preview → confirm with `ROSTER_CHANGED`.
+- Attachment and ping-all confirm no longer have a silent fallback when the client cannot prompt. Declined or cancelled elicitation after a human-scale wait is `CANCELLED` with `approval_action` (`decline` or `cancel`). Missing elicitation capability, url-only elicitation, a signaled auto-decline, or a decline/cancel faster than a human could respond (Codex `approval_policy` `never` has been observed to advertise elicitation then decline in ~1.7s) is `APPROVAL_UNAVAILABLE`. A slower `CANCELLED` with `approval_action=decline` may still be an auto-decline; use on-request. Nothing is transferred in either path.
+- Lifecycle `status` reports `unmanaged` (not `cutover_unknown`) when `state.json` exists and the active process is not a managed lease. `previous_version` is always `state.json` previous, including under `cutover_unknown`.
+
+### Changed
+
+- Attachment sends and all-Bot PING confirms need a client approval mode that prompts (Codex on-request, not never). Documented in the README, attachment contract, and SECURITY.md.
+- Relay development overrides now pin `sharp@0.35.5` and `source-map-js@1.2.2` to clear high audit findings. Runtime connector dependencies are unchanged.
+
 ## [0.2.0-beta.10] - 2026-10-04
 
 Prerelease. Stable `0.2.0` is not published; this beta carries every change since `0.2.0-beta.9`.
